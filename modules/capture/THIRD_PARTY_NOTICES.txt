@@ -1,0 +1,18 @@
+Third-Party Materials — Capture Artifact Acquisition
+
+scrcpy-server v5.0.1
+Copyright Genymobile and Romain Vimont
+License: Apache License 2.0
+Source: https://github.com/Genymobile/scrcpy/tree/a60891aea193d92e7e5c3942700eca63f9d19a5f
+Asset: https://github.com/Genymobile/scrcpy/releases/download/v5.0.1/scrcpy-server-v5.0.1
+SHA-256: 764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536
+Primary fingerprint: 456958E85A185DD5C2D1E4E80C822B298461FA03
+Signing-subkey fingerprint: E39E2DE6A55F5AA6D8EFB79ACA01F46F18683B3D
+The server is downloaded into a private verified cache; it is not bundled here.
+
+openpgp 6.3.2
+License: LGPL-3.0+
+Source: https://github.com/openpgpjs/openpgpjs
+This replaceable dependency is isolated to detached setup-time verification.
+Its objects and types do not cross the artifact module seam.
+Compliance and distribution obligations remain subject to legal review.

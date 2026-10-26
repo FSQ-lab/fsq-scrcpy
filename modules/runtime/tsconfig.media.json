@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../../.build/runtime-media",
+    "noEmitOnError": true
+  },
+  "include": ["src/media.ts", "src/viewer.ts", "src/ws.ts", "src/types.ts", "src/strict-json.ts", "src/clock.ts", "src/state.ts", "test/media*.test.ts", "test/viewer*.test.ts", "test/ws*.test.ts", "../contracts/src/index.ts", "../capture/src/**/*.ts"]
+}

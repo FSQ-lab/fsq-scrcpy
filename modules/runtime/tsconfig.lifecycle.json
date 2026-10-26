@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../../.build/runtime-lifecycle",
+    "noEmitOnError": true
+  },
+  "include": ["src/types.ts", "src/strict-json.ts", "src/clock.ts", "src/state.ts", "src/auth.ts", "src/http.ts", "test/support/runtime-fixtures.ts", "test/state*.test.ts", "test/auth*.test.ts", "test/http*.test.ts", "test/strict-json*.test.ts", "../contracts/src/index.ts"]
+}

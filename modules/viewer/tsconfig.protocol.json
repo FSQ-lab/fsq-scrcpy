@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../../.build/viewer-protocol",
+    "noEmitOnError": true,
+    "lib": ["ES2024", "WebWorker"]
+  },
+  "include": ["src/protocol.ts", "src/worker.ts", "src/assets.ts", "test/protocol*.test.ts", "test/worker*.test.ts", "test/assets*.test.ts", "../contracts/src/index.ts"]
+}

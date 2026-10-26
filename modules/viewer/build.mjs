@@ -1,0 +1,11 @@
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { build } from "esbuild";
+const root=dirname(fileURLToPath(import.meta.url)),dist=join(root,"dist"),protocolOnly=process.argv.length===3&&process.argv[2]==="--protocol-only";
+if(!protocolOnly&&process.argv.length!==2)throw new Error("Usage: build.mjs [--protocol-only]");
+const bundle=async(entry,name,loader,define)=>{const options={entryPoints:[entry],bundle:true,write:false,format:"esm",platform:"browser",target:"chrome155",sourcemap:false,splitting:false,minify:true,charset:"utf8",legalComments:"none",treeShaking:true,entryNames:name,...(loader?{loader}:{}),...(define?{define}:{})},a=await build(options),b=await build(options);if(a.outputFiles.length!==1||b.outputFiles.length!==1||!Buffer.from(a.outputFiles[0].contents).equals(Buffer.from(b.outputFiles[0].contents)))throw new Error("Nondeterministic build");return a.outputFiles[0].contents;};
+const worker=await bundle(join(root,"src/worker.ts"),"worker"),outputs=[{role:"worker-module",name:"worker.js",mime:"text/javascript; charset=utf-8",bytes:worker}];
+if(!protocolOnly){const workerHash=createHash("sha256").update(worker).digest("hex"),entry=await bundle(join(root,"src/app.ts"),"entry",undefined,{__FSQ_WORKER_URL__:JSON.stringify(`/assets/${workerHash}/worker.js`)}),style=await bundle(join(root,"src/style.css"),"style",{ ".css":"css" });outputs.unshift({role:"entry-module",name:"entry.js",mime:"text/javascript; charset=utf-8",bytes:entry});outputs.push({role:"style",name:"style.css",mime:"text/css; charset=utf-8",bytes:style});}
+await rm(dist,{recursive:true,force:true});await mkdir(dist,{recursive:true});const evidence=[];for(const output of outputs){const text=Buffer.from(output.bytes);if(/sourceMappingURL|\beval\s*\(|["'](?:blob|data):/u.test(text.toString("utf8")))throw new Error("Forbidden build content");await writeFile(join(dist,output.name),text);const reread=await readFile(join(dist,output.name)),sha256=createHash("sha256").update(reread).digest("hex");evidence.push({role:output.role,name:output.name,sha256,mime:output.mime,bytes:reread.byteLength});}process.stdout.write(`${JSON.stringify({protocolOnly,assets:evidence})}\n`);

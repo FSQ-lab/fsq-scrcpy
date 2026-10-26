@@ -1,0 +1,3 @@
+task:
+  maxConcurrency: 3
+  maxRecursionDepth: 1

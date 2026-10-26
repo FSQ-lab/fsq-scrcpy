@@ -1,0 +1,7 @@
+export type ViewerAssetRole="entry-module"|"worker-module"|"style";
+export interface ViewerAssetEntry{readonly role:ViewerAssetRole;readonly name:string;readonly sha256:string;readonly mime:"text/javascript; charset=utf-8"|"text/css; charset=utf-8"}
+export interface ViewerAssetManifest{readonly entries:readonly ViewerAssetEntry[]}
+export type ViewerAssetInput=Readonly<ViewerAssetEntry&{bytes:Uint8Array}>;
+export const assetUrl=(entry:ViewerAssetEntry):string=>`/assets/${entry.sha256}/${entry.name}`;
+export function assetByRole(manifest:ViewerAssetManifest,role:ViewerAssetRole):ViewerAssetEntry{const found=manifest.entries.filter(entry=>entry.role===role);if(found.length!==1)throw new TypeError("Invalid asset manifest");return found[0]!;}
+export async function makeAssetInput(role:ViewerAssetRole,name:string,sha256:string,bytes:Uint8Array):Promise<ViewerAssetInput>{if(!(["entry-module","worker-module","style"] as unknown[]).includes(role)||!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(name)||!/^[0-9a-f]{64}$/.test(sha256)||!(bytes instanceof Uint8Array)||bytes.byteLength<1||bytes.byteLength>1_048_576)throw new TypeError("Invalid asset");const copy=bytes.slice(),digest=new Uint8Array(await crypto.subtle.digest("SHA-256",copy)),actual=Array.from(digest,v=>v.toString(16).padStart(2,"0")).join("");if(actual!==sha256)throw new TypeError("Invalid asset");return Object.freeze({role,name,sha256,mime:role==="style"?"text/css; charset=utf-8":"text/javascript; charset=utf-8",bytes:copy});}

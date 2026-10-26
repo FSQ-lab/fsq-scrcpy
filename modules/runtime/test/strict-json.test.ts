@@ -1,0 +1,6 @@
+import assert from "node:assert/strict"; import test from "node:test"; import { parseStrictJson, exactObject } from "../src/strict-json.js";
+const bytes = (value: string): Uint8Array => new TextEncoder().encode(value);
+test("strict parser returns frozen null-prototype single objects", () => { const value = parseStrictJson(bytes('{"streamId":"x","visible":true,"n":4,"nested":{"x":null}}')); assert.equal(Object.getPrototypeOf(value), null); assert.ok(Object.isFrozen(value)); assert.equal(exactObject(value, ["streamId","visible","n","nested"]), true); });
+test("strict parser rejects duplicates, arrays, trailing data and noncanonical numbers", () => { for (const source of ['{"x":1,"x":2}', '[]', '{"x":1}x', '{"x":1.0}', '{"x":1e2}', '{"x":01}', '{"x":-0}', '{"x":9007199254740992}']) assert.throws(() => parseStrictJson(bytes(source)), /Malformed JSON/); });
+test("strict parser rejects malformed UTF-8, lone Unicode and oversize", () => { assert.throws(() => parseStrictJson(Uint8Array.of(0xff))); assert.throws(() => parseStrictJson(bytes('{"x":"\\ud800"}'))); assert.throws(() => parseStrictJson(new Uint8Array(4097))); });
+test("strict parser rejects accessors and additional exact keys", () => { const parsed = parseStrictJson(bytes('{"x":1}')); assert.equal(exactObject(parsed, []), false); assert.equal(exactObject(parsed, ["x"]), true); });

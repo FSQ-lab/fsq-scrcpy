@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "outDir": "../../.build/viewer-app",
+    "noEmitOnError": true,
+    "lib": ["ES2024", "DOM", "DOM.Iterable"]
+  },
+  "include": ["src/app.ts", "src/state.ts", "test/app*.test.ts", "test/state*.test.ts", "test/render*.test.ts", "../contracts/src/index.ts"]
+}
