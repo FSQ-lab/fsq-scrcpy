@@ -103,3 +103,21 @@ Session precedes frames. Each epoch contains exactly one normalized `CodecConfig
 
 - The v1 private cache protects against other OS users only under a trusted-root precondition: `cacheRoot` is a real, non-symlink directory owned by the effective uid with mode `0700`; every existing ancestor is a real non-symlink directory and is not group/other-writable, except a sticky directory such as `/tmp`. Identity directories are `0700` and files `0600`. Every file open uses `O_NOFOLLOW`; the identity directory is opened with `O_NOFOLLOW`; device/inode identity is checked before and after each pathname operation and again before use. A stable replacement, content/metadata tamper or observed inode mismatch is `artifact-mismatch`; an absent/unreadable path or other acquisition I/O failure remains `artifact-unavailable`.
 - Any malicious process already running as the same macOS uid is outside current v1, including ancestor/final-component replacement races and in-place mutation, truncation or rewrite between verification and path-based `adb push`. Node.js 24 exposes no `openat`/`renameat`/`unlinkat` or descriptor-relative child operation, and `/dev/fd/<directory-fd>/<child>` is not supported on the target host. No same-uid interference-resistance claim is made. Bringing it into scope requires a separately selected native helper/addon and packaging/security review. SHA-256 is still rechecked immediately before every device push; stable or observed tamper fails closed.
+
+## iOS WDA Standalone Contract
+
+本节替代仅 Android、concrete CaptureSource/CaptureSession 及 videoConstraints 输入限制；Android wire、质量、artifact、ADB 和 cleanup 契约不变。
+
+- `CaptureSource`、`CaptureSession` 为平台中立接口：`open({deviceRef}, cancellation?:AbortSignal):Promise<CaptureSession>`；session 提供 bounded `events()`、并发安全幂等 `stop("explicit-stop"|"cancelled")` 和资源释放后返回同一缓存结果的 `closed()`。删除 VideoConstraints 及兼容 overload。
+- Concrete 为 `ScrcpyV501CaptureAdapter` 和 `WdaMjpegCaptureAdapter`。策略在构造时固定，Runtime 无 platform/codec open 分支；无 base class、fallback 或 plugin registry。Android 固定原 H.264/720/30/8-Mbps/no-crop/no-upscale 策略。
+- WDA binding 私有复制并冻结完整 v2 iOS DeviceRef 与 endpoint；open 严格匹配四个身份字段。Android 同样匹配完整配置身份。provider locator 不序列化。
+- WDA 外部身份固定 tag v16.15.3、commit `02cb92f0e93c8b021443bcbb8eeb80932c113220`；FSQ 不下载、执行或管理 WDA/forward，不发送任何自动化或 Settings 命令。
+- endpoint 仅接受字面 `http://127.0.0.1:<port>/`，port 1..65535 无前导零；不接受 DNS、IPv6、userinfo、query、fragment、其他路径、redirect 或 proxy 环境。连接与 response-header deadline 各 5 秒，read-idle 12 秒；取消中断连接和读取，无重试。
+- 接受且仅接受 HTTP/1.0 200 OK 及每项恰好一次的响应头：`Server: WDA MJPEG Server`、`Connection: close`、`Max-Age: 0`、`Expires: 0`、`Cache-Control: no-cache, private`、`Pragma: no-cache`、`Content-Type: multipart/x-mixed-replace; boundary=--BoundaryString`。名称大小写不敏感，值仅有界 OWS normalization；拒绝额外/重复/折叠头。
+- 每 part 精确 `--BoundaryString\r\nContent-type: image/jpeg\r\nContent-Length: <canonical decimal>\r\n\r\n<JPEG>\r\n\r\n`，不接受额外头；任意 TCP fragmentation 不改变结果。响应头 ≤8 KiB，part header ≤1 KiB，JPEG ≤8,126,464 bytes；按当前状态所需字节限制 buffer，长度先校验后分配，禁止无界 EOI 搜索。
+- JPEG 要求 SOI/EOI、有界合法 SOF，width/height 各 1..4096，且 `width<=floor(8388608/height)`。`exifr@7.1.3` 仅从内存 Uint8Array 解析 orientation，不读取 URL/path，不解码像素。非法/截断/越界输入 fail closed 为 malformed-media。
+- SessionStarted 增加 codec `h264-annexb|mjpeg` 与 timestampOrigin `source|host-arrival`。H.264 保留 config/key grammar；MJPEG 无 Config，每 Frame 完整独立 JPEG、key=true，PTS 在完整接收并验证后取 source-session 起点以来单调微秒。
+- coded size 或 EXIF orientation 改变：SessionEnded reconfigured→严格递增 epoch SessionStarted→JPEG。display size 遵循 orientation；序列跨 session 严格增加、epoch 内 PTS 非负不回退。
+- WDA 最多保留一个 parsed 未交付 JPEG，后者替换前者并记录 drop，不产生 decoder GAP。控制/terminal 有界且不可丢；恰好一次 whole-stream terminal，之后无事件。
+- stop/cancel 关闭 FSQ socket、清空 parser/队列并等待 producer 退出；不触及外部 WDA、forward 或 Session。安全错误使用固定 stage，不暴露 endpoint 或原始 provider error。
+

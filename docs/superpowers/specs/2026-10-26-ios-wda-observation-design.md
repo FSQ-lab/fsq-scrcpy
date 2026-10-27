@@ -1,10 +1,10 @@
 # iOS WDA Video Observation Design
 
-- **Status:** Final design confirmed by the user; independent design review passed; implementation not authorized
+- **Status:** Original iOS goal, size exception and ACK/profile SPEC gate confirmed; WP1–WP3 module gates passed; WP4 implementation/no-device checks and cumulative code review passed after one visibility repair; native Viewer/device acceptance blocked, no feature/platform Done
 - **Date:** 2026-10-26
-- **Authorized workflow:** `/requirements-to-design`
+- **Authorized workflow:** `/requirements-to-design` for design; `/spec-driven` for IOS-WDA-STANDALONE-01 only
 - **First platform combination:** macOS arm64 local host + one USB iPhone + one externally owned WebDriverAgent MJPEG source + one logical stream + one standalone Chrome Viewer
-- **Implementation authorization:** none; a later explicit `/spec-driven docs/superpowers/specs/2026-10-26-ios-wda-observation-design.md` is required
+- **Implementation authorization:** `/spec-driven docs/superpowers/specs/2026-10-26-ios-wda-observation-design.md`; user confirmed SPEC delta and moving the two-real-Adapter gate from WP1 to WP2. Other features remain unauthorized.
 
 ## 1. Background
 
@@ -534,13 +534,16 @@ Only one feature may be in implementation at a time. Changed-line budgets are cu
 
 | WP | Primary module | Behavior/seam gate | Product | Tests | Docs |
 | --- | --- | --- | ---: | ---: | ---: |
-| WP1 | Contracts + Capture seam | control v2 and two real Adapter types; Android regression unchanged | ≤280 | ≤350 | ≤70 |
-| WP2 | Capture | strict attach-only WDA source, multipart/JPEG metadata, cancellation | ≤360 | ≤470 | ≤100 |
-| WP3 | Runtime | media minor 1 MJPEG, one-frame ownership, terminalization | ≤250 | ≤310 | ≤80 |
-| WP4 | Viewer | Worker ImageBitmap decode, Canvas/Live/visibility cleanup | ≤310 | ≤370 | ≤100 |
-| **Total** | | | **≤1200** | **≤1500** | **≤350** |
+| WP1 | Contracts + Capture seam | control v2, neutral interfaces and real Android Adapter; stage verified/reviewed | 79 measured | 190 measured | included in shared row |
+| WP2 | Capture | strict attach-only WDA Adapter; stage verified/reviewed, not real-platform acceptance | 459 measured | 585 measured | included in shared row |
+| Shared documentation | All modules | All original-baseline SPEC/design/exception materials, including WP1/WP2 docs | 0 | 0 | ≤300 |
+| WP3 | Runtime | media1.1, atomic painted ACK, ownership/freshness, target-profile bootstrap and caller/generated closure | ≤530 | ≤550 | ≤20 |
+| WP4 | Viewer | target-profile preflight, ImageBitmap/Canvas/Live/cleanup, standalone composition and final integration | ≤532 | ≤675 | ≤30 |
+| **Total** | All modules | original HEAD cumulative; generated and package/lock included | **≤1600** | **≤2000** | **≤350** |
 
 Each WP has unique file ownership, module verification and independent review before the next WP. The feature is Done only after the cumulative real WDA/iPhone/Chrome path passes and a new independent review closes the complete implementation diff.
+
+The user explicitly authorized a one-feature size exception in a renewed spec-driven request; root AGENTS records it. The measured WP1/WP2 product rows include their generated/packaging changes. All existing documentation (232 lines before the renewed gate) and this gate's materials count toward the shared300 reserve; no document is excluded by phase or owner. These are one original-HEAD ledger, not fresh baselines. WP3/WP4 allocations include their caller migrations and generated outputs; any new allocation must stay within the authorized feature totals. The user confirmed the independently reviewed ACK/profile SPEC delta before WP3 began; the three module contracts are active without pending markers.
 
 ### IOS-WDA-LIFECYCLE-02 — Truthful source changes and failure cleanup
 
@@ -636,3 +639,57 @@ Confirmed by the user in this requirements workflow:
 ## 22. Independent design review
 
 The first independent full review returned `status=findings` with `DR-IOS-01..08`: undefined platform-neutral open policy, incomplete binding identity, incomplete WDA headers, sequence/credit loss during replacement, missing MJPEG reconfiguration grammar, stale Live, unreachable painted-first-frame timeout and unbounded decoded pixels. The repair-only review closed seven findings and identified direct regression `DR-IOS-04-R1` because staged plus assigned JPEG bytes were not both counted in the Runtime cap. The final targeted repair froze one continuous 8 MiB ownership calculation and maximum-payload fixtures. The same independent context verified content SHA-256 `4a18876828390efaed03b16086e53af1e5d6029cdab0a490c461231a2defbaf3`, closed `DR-IOS-01..08` and `DR-IOS-04-R1`, found no direct regression and returned **PASS**.
+
+## 23. Current implementation evidence
+
+- Baseline: `main`, HEAD `471e56ca29b504007faef17e517ad4ef382b5c01`, initially clean. Intake design SHA-256 `a767c00e7dfdfd68388e73bfbceae29130bff5846d0893607a8fbd1e8411308e`.
+- WP1 implements control v2, platform-neutral CaptureSource/CaptureSession, the real ScrcpyV501CaptureAdapter and all current callers; WDA implementation remains WP2. The user explicitly moved the two-real-Adapter acceptance gate to WP2 without changing serial order or budgets.
+- Node 24.22.1/npm 11.19.1 ran `verify:contracts` (10 pass), `verify:capture` (61 pass), `verify:runtime` (85 pass) and `verify:viewer` (38 protocol/Worker + 34 app tests pass). No failures. Compiler emission refreshes the existing tracked Contracts generated JS/declarations/map; normal builds remain under `.build`.
+- No-device smoke exercised real modules: v2 iOS validation, legacy/provider/request rejection, wrong-Adapter rejection, lazy demand-pending creation, idempotent same access and explicit stopped cleanup. This is not WDA/media/real-device acceptance.
+- Exact exifr 7.1.3 package integrity, MIT license and orientation API were verified; exact dependency/lock addition and clean `npm ci --ignore-scripts` passed (9 packages, no production transitives for exifr). Synthetic orientations1..8 passed. Node-only Capture loads its published CJS orientation function with a narrow local signature because the package's general Input declaration requires DOM types; no DOM globals, skipLibCheck or dependency patch was added. Adapter validation rejects malformed metadata and invalid orientation instead of relying on exifr defaults.
+- No WDA/Appium/forward/device operation, commit or push performed. No Chrome installation exists at the specified `/Applications/Google Chrome.app` or checked application directories; real Chrome acceptance is unavailable until the external prerequisite is provided. No support claim is made.
+- WP1 full review found no product defect; `WP1-AUD-01` identified 96 cumulative documentation lines against the original 70-line WP1 ceiling. The user approved WP1/WP2 docs reallocation to 100/70, total350 unchanged; all96 lines remain counted. Independent repair-only review passed and closed the finding. WP1 gate is complete; real-device evidence remains unverified. Before WP2 code, the user approved product budgets80/560/250/310 (including WP1 generated outputs) and test budgets220/600/310/370, preserving feature totals1200/1500. WP2 independent review, WP3–WP4 implementation and real iPhone/WDA/Chrome acceptance remain pending.
+- WP2 now implements the real WdaMjpegCaptureAdapter using one Node net socket and a fixed GET plus bounded WDA-specific raw HTTP/part grammar. It does not implement general HTTP, retries, proxying or device operations. The parser validates complete bounded JPEG/SOF/EXIF metadata; sessions maintain monotonic sequence/PTS, orientation epochs, one pending latest-frame slot and producer/socket cleanup.
+- WP2 verification: `verify:capture`84/84 and actual-Adapter synthetic TCP source smoke passed (JPEG, epoch change, monotonic timing, cancellation and external source survival); Runtime85/85 passed. Viewer initially failed an existing hardcoded asset-hash/byte-count test; that incidental implementation test was deleted, not repinned. Behavioral Viewer regression then passed38+33. Initial ES2024 Array.fromAsync/type-declaration compilation failures were fixed without changing the pinned compiler/lib. No real WDA/device/browser evidence is implied.
+
+## 24. Design repair gate
+
+WP3 was stopped before any write because the former allocation was insufficient, immediate painted ACK conflicted with128/10s and target-codec preflight lacked a bootstrap declaration. Independent full/incremental design reviews passed the decision record and exact preflight; renewed gate-doc full review plus one table repair review passed. The user retained the single iOS goal, explicitly authorized1600/2000/350 from the original HEAD and then confirmed the precise ACK/profile SPEC delta. The [repair record](2026-10-27-ios-wda-observation-replan.md) retains the source evidence and decisions. WP3 proceeds first; WP4, real-resource/final-acceptance and complete-feature audit gates remain. No platform or complete-feature Done is claimed.
+
+
+## 25. WP3 implementation evidence — stage review passed
+
+WP3 reuses Android's MediaChannel, Runtime lifecycle/auth/lease/terminal paths and sole Viewer build; adds MJPEG minor1, bounded staging/proof ownership, atomic painted ACK, freshness and immutable profile bootstrap. Viewer source only retains a minor0 fail-closed guard until WP4 implements the shared codec branch; no second Viewer, registry or source restart was added.
+
+| Executed command | Result |
+| --- | --- |
+| `npm run verify:contracts` | 11 passed |
+| `npm run verify:capture` | 84 passed |
+| `npm run verify:runtime` | 106 passed after the first lifecycle repair, including original H.264 concurrent/deadline replacement regressions |
+| `npm run verify:viewer` | 38 protocol/Worker +33 app/render tests passed after generated Contracts refresh and startup cleanup repair |
+
+- An independent real-clock API smoke used actual WdaMjpegCaptureAdapter, protected pairing/cookie/WebSocket and synthetic TCP JPEG input. It observed syncing/streaming, stale interruption/recovery, hidden epoch grace/resume and terminal cleanup; one source connection, one final END and an externally owned listener still alive. Paint ACKs were simulated, not browser paint or real-device evidence.
+- The first smoke harness mixed private manifest factories from separate compiled module graphs and failed startup. That also exposed an owned listener surviving failed startup/close; bind failure now awaits the existing transport cleanup path. An isolated regression verifies the fixed typed error and natural owner-process exit. A transient internal libuv-handle-count assertion was removed rather than pinned to event-loop cleanup timing; no consumer behavior test was removed.
+- Generated Contracts JS/declarations/map were refreshed only by the approved compiler, and the sole Viewer bundles by the existing build. All source/tests/generated/package changes remain in the original-HEAD ledger. WP3 full review findings WP3-AUD-01/02/03 were reproduced, repaired and closed by independent repair-only round1; no new findings/direct regressions remained. Tech Lead accepted the WP3 module gate, not full feature/platform acceptance; WP4 now proceeds on the shared Viewer.
+- The user deferred Chrome preparation and requested Android pipeline reuse. No browser install/substitution or WDA/device operation was performed; actual Viewer/iPhone/WDA/forward acceptance and final feature review remain outstanding. Fixture/API results do not create a support claim.
+- First repair preserves the absolute no-demand deadline through hello/reconnect/HTTP refresh, synchronizes auth DELETE/TTL/revocation with paint/freshness fencing, and checks already-expired deadlines before hide/show. The same actual Adapter/protected Runtime repro changed from all four violation flags true to false; old ACK/epoch stayed grace/0, original deadline stopped the sole source with lease-expired, and late paint was rejected. Real-clock smoke passed again with one source and one END.
+- Initial repair verification exposed a direct H.264 concurrent-replacement regression: queued admission could destroy an already-claimed socket before auth rejection. It was corrected by shared authoritative prevalidation before cleanup plus existing post-cleanup revalidation; no test assertion or timeout was weakened. Final Runtime/Viewer checks passed; no real browser/device claim follows.
+
+## 26. WP4 shared Viewer evidence — code review passed, native acceptance blocked
+
+The existing Android ViewerApp/WorkerController/Canvas/build now carries the MJPEG codec branch, target-profile preflight, immediate minor1 completion ACK, bounded bitmap ownership and local stale/recovery handling. There is still one entry module, one Worker and one render surface; H.264 keeps its own decoder/ACK behavior. No second Viewer, transcode, source registry, browser-visible WDA endpoint or external Agent transport was added.
+
+| Executed command | Result |
+| --- | --- |
+| `npm run verify:viewer` | 57 protocol/Worker +45 app/render tests passed after queued-visibility repair |
+| `npm run verify:contracts` | 11 passed |
+| `npm run verify:capture` | 84 passed |
+| `npm run verify:runtime` | 106 passed |
+
+- Standalone WDA uses the existing command `npm run serve:viewer:real -- --wda`; Android retains the same command without the flag. The external owner privately prepares `FSQ_DEVICE_ALIAS` (canonical v4 identity) and `FSQ_WDA_MJPEG_ENDPOINT` (approved loopback binding), never placing values in argv, chat or logs. Existing owner stdin approval, `{"type":"inspect"}` and `{"type":"shutdown"}` remain shared; FSQ does not prepare or manage WDA/forward.
+- An independent subprocess smoke launched the actual compiled entry with `--wda` and private synthetic binding, fetched the single shared entry asset/profile bootstrap, performed owner approval/cookie/media, inspected streaming after a manual ACK, then shut down naturally while the external synthetic listener remained alive. It opened one source connection; this is actual Node composition/wire proof, not real WDA or native browser paint.
+- The actual built Worker was also executed under Node's genuinely unavailable bitmap foundation: after a profile-aware start it reported unsupported with zero WebSocket attempts and zero source requests; the normal dispose message closed it. An initial harness assumption that unsupported self-terminates before Main disposal was corrected in the harness, not product code.
+- Old tests pinning immediate AVC-only rejection before profile selection and incidental build source-text/nonempty assertions were deleted, not repinned; target-profile, timeout, reset, ownership, real backing/aspect and ACK boundary tests remain. No runtime fallback was introduced to satisfy tests.
+- The parent conservatively counts all changed real-viewer-server runtime-entry hunks as product, including old caller migrations. All generated bundles and new files remain in the original-HEAD ledger. Actual Chrome JPEG decode/transfer/Canvas, real First Live/orientation/resources and iPhone/WDA/forward plus applicable Android real regression are still unverified; browser preparation remains deferred by the user. No support or complete-feature Done claim is made.
+- Full cumulative review found WP4-AUD-01: an encoded old-visible-cycle JPEG waiting behind reset could acquire the new generation and wrongly paint Live. Parent reproduced generation3/fresh=true/paintedSequence2 before repair. Worker now retains its private receipt visibility epoch through the gate, still validates/advances protocol sequence, and releases stale input without native decode/output or paint proof.
+- The identical repro now emits no old frame and exactly one release-only ACK(sequence2,painted0); positive queued Session/reset and genuinely new-frame Worker/Main Live regressions pass. The actual shared-entry/built-Worker unsupported/wire smoke passed again. Independent cumulative full review plus repair-only round1 closed WP4-AUD-01 with no new findings/direct regressions. Code/no-device verification is complete, but neither controlled decoders nor manual ACKs prove native Chrome or device acceptance; the full feature remains blocked on those real gates.

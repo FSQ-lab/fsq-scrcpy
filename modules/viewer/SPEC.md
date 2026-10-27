@@ -90,3 +90,29 @@ Viewer 可依赖 Runtime 和 Contracts，不依赖 Capture 内部实现或 `Appi
 ## WP4 Transport-Resync Rule
 
 - GAP reasons `1=shared-overflow` and `2=viewer-overflow` use the confirmed same-epoch replayed identical session/config followed by key. GAP reason `3=transport-resync` instead terminates old-epoch readiness: after reset/reset-complete, the next accepted media envelope must be one SessionStarted with an epoch strictly greater than the old epoch, followed by exactly one new config and a key. Same-epoch replay after reason 3, higher-epoch session after reasons 1/2, or any intervening frame/config is terminal `malformed-media`. Both paths keep the GAP envelope watermark/ownership release and generation fencing rules.
+
+## iOS WDA Standalone Contract
+
+本节增加同一 standalone Worker/Main/Canvas 管线的 MJPEG codec 分支；Android H.264 minor 0、质量和 decoder 契约不变，WDA 不适用 Android 720p/30-FPS 门槛。
+
+- Viewer 同时接受 H.264 minor 0、MJPEG minor 1；MJPEG config/non-key/非法 epoch 拒绝。浏览器永不接收 WDA endpoint，不使用直连 img、transcoding、object URL、存储或第二 Viewer。
+- Worker JPEG 路径为完整 JPEG→内存 Blob(image/jpeg)→`createImageBitmap(...,{imageOrientation:"from-image"})`→transfer ImageBitmap→Main Canvas draw→close→frame-complete/ACK。探测 Worker createImageBitmap、transferable ImageBitmap 和 Canvas；不支持为 viewer-unsupported，禁止开始或续租 demand。
+- decode 前校验 JPEG side≤4096、area≤8,388,608 及完整性；解码后验证 orientation-correct bitmap 与 Session display size 一致，否则 close 并 malformed-media。Canvas backing size 等于实际 display size，CSS 保持比例，不裁切、拉伸或上采样。
+- Worker 最多一个 decoding image 与一个 transferred-not-completed image，Main 最多一个 render image；每个逻辑四字节像素 image ≤32 MiB。所有 draw/discard/replacement/reset/hide/terminal/error 路径 close；异步旧 generation 输出也 close，不恢复 Live。
+- Main/Worker frame union 增加 ImageBitmap；generation、reset handshake、exact frame-complete 与所有权规则不变。MJPEG reason 3 释放 watermark 后只接受更高 epoch Session→key JPEG；不接 Config。H.264 GAP grammar 原样保留。
+- 成功 visible paint 并 close 后才推进 paintedSequence；release-only 仅推进累计 sequence。Minor 1 每次新 paint 立即发送 exact `{v:1,type:"ack",sequence,paintedSequence}`，初始 paint=0，单调≤sequence；minor 0 ACK 不变。
+- 新 epoch/reset/hide 同步去除 Live；fresh paint 才恢复。两秒无当前 epoch paint 显示 interrupted/non-Live，十二秒失败；同 CaptureSession 在期限内可恢复。首 paint 五秒期限由 Runtime 从首次有效 visible demand 权威计时，非 HTTP activity、source arrival 或旧图证明。
+- hidden/pagehide 清空 decode/render 并停止 demand；grace 内返回 syncing，fresh paint 才 Live；五秒后 Runtime 关闭 FSQ source。WDA、forward 和自动化不由 Viewer 管理。
+- 只记录无像素、无 locator 的尺寸/orientation/drop/arrival/startup 证据，不宣称 FPS、分辨率或延迟支持；支持矩阵须另经真实设备和浏览器证据确认。
+
+## ACK/profile Contract
+
+本节覆盖目标能力探测、Main/Worker start及minor1完成ACK条款，不新增第二媒体管线或控制面。
+
+- Main从既有受保护HTML根属性读取精确mediaProfile枚举；缺失/未知或生产Canvas2D context不可用即unsupported，不启动Worker/demand。Main→Worker start恰好为`{type:"start",origin,streamId,mediaProfile}`，保留origin/UUID/single-start校验。H.264只要求其原有Worker/binary WebSocket/VideoDecoder/EncodedVideoChunk及Main Canvas基础能力，不新增JPEG或raw-VideoFrame构造要求；实际AVC支持仍由后续真实SPS/config核验。
+- MJPEG要求Worker createImageBitmap、可转移ImageBitmap、Main ImageBitmap类型校验及实际Canvas绘制。Worker对一个固定≤4KiB、coded1×2/EXIF orientation6的合成JPEG以`imageOrientation:"from-image"`解码，预期bitmap2×1；它不是source Frame、source metric、paintedSequence或Live证明，不含用户内容。
+- Worker→Main probe恰好为`{type:"capability-probe",generation:1,mediaProfile:"mjpeg",frame:ImageBitmap}`，bitmap只转移一次。Main只接受当前Worker的单个待决启动probe，验证资源类型/2×1尺寸，通过唯一生产bitmap/Canvas路径绘制、清除探测像素并在finally关闭，不进入Live/metrics。Main→Worker result恰好为`{type:"capability-result",generation:1,supported:boolean}`，只接受一次待决结果；这不是第二Viewer或source传输。
+- 总preflight deadline为Worker接受start后的5000单调毫秒，成功处理时也重查deadline。MJPEG成功前不得连接WebSocket、发送hello或visible renewal；H.264基础检查成功后沿用正常连接。失败/超时为viewer-unsupported，首次成功之前Capture.open/visible-renewal均为0。非预期/重复probe/result为malformed-control，不得创建额外socket或复活已结束Worker。
+- 探测中visibility只更新desired flag；tiny synthetic probe可在hidden完成但不进入Live，成功的hidden连接不产生visible demand。pagehide/dispose则fence。转移失败由sender关闭未转移bitmap；成功转移后Main为唯一关闭者，含旧Worker/generation、非法消息、pagehide/dispose和draw error。迟到decode由Worker关闭且不再转移；超时/unsupported释放全部已知probe资源并dispose Worker，不保留图片/object URL/source socket。
+- 每次minor1 draw或discard完成且图像关闭后，立即发送一条合并ACK；成功当前可见generation的paint推进release/paint，discard只推进release。不能先release再补paint、等待四帧或tick；GAP不制造paint或冗余ACK。旧epoch/旧可见周期完成不能令当前表面Live；minor0的精确ACK、四帧累计和tail flush保持原样。
+- preflight的5000ms仅为基础能力资源期限，不保证所有真实内容均可解码，也不替代First Live计时。首个有效authenticated visible renewal才启动权威五秒fresh-paint deadline；原2秒stale、12秒终止、grace及ImageBitmap全路径清理要求不变。

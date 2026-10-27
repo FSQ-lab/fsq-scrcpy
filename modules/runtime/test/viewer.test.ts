@@ -8,6 +8,34 @@ const hello={v:1,type:"hello",streamId:descriptor.streamId};
 test("hello is first, exact, once and required within five seconds",()=>{const a=setup();send(a,{v:1,type:"leave"});assert.deepEqual(a.ws.closes,[1008]);const b=setup();b.clock.tick(5_000);assert.deepEqual(b.ws.closes,[1008]);const c=setup();send(c,hello);assert.deepEqual(c.events,["hello"]);send(c,hello);assert.deepEqual(c.ws.closes,[1008]);});
 test("strict text schema rejects binary, duplicate keys, exponent and oversize",()=>{for(const act of [(v:ReturnType<typeof setup>)=>v.ws.message("{}",true),(v:ReturnType<typeof setup>)=>v.ws.message('{"v":1,"v":1,"type":"hello","streamId":"x"}',false),(v:ReturnType<typeof setup>)=>v.ws.message('{"v":1e0,"type":"hello","streamId":"x"}',false)]){const v=setup();act(v);assert.deepEqual(v.ws.closes,[1008]);}const large=setup();large.ws.message("x".repeat(4097),false);assert.deepEqual(large.ws.closes,[1009]);});
 test("visible lease and absolute credit update independently",()=>{const v=setup();send(v,hello);send(v,{v:1,type:"lease-renew",visible:true,creditFrames:4,creditBytes:1000});send(v,{v:1,type:"lease-renew",visible:true,creditFrames:1,creditBytes:100});assert.deepEqual(v.events,["hello","visible:true","visible:true"]);v.clock.tick(4_999);assert.equal(v.events.includes("expired"),false);v.clock.tick(1);assert.equal(v.events.at(-1),"expired");const hidden=setup();send(hidden,hello);send(hidden,{v:1,type:"lease-renew",visible:false,creditFrames:0,creditBytes:0});hidden.clock.tick(5_000);assert.deepEqual(hidden.events,["hello","visible:false"]);});
-test("ACK stale is harmless, future closes, canonical decimal is required",()=>{const v=setup();v.media.setCredit(4,1000);v.media.sendSession({kind:"SessionStarted",epoch:1,codec:"h264",codedSize:{width:1,height:1},displaySize:{width:1,height:1},timebase:1_000_000});v.media.sendFrame({kind:"Frame",epoch:1,sequence:1n,ptsUs:1n,key:true,bytes:Uint8Array.of(1)});send(v,hello);send(v,{v:1,type:"ack",sequence:"2"});assert.deepEqual(v.ws.closes,[]);send(v,{v:1,type:"ack",sequence:"2"});assert.deepEqual(v.ws.closes,[]);send(v,{v:1,type:"ack",sequence:"3"});assert.deepEqual(v.ws.closes,[1008]);const bad=setup();send(bad,hello);send(bad,{v:1,type:"ack",sequence:"01"});assert.deepEqual(bad.ws.closes,[1008]);});
+test("ACK stale is harmless, future closes, canonical decimal is required",()=>{const v=setup();v.media.setCredit(4,1000);v.media.sendSession({kind:"SessionStarted",epoch:1,codec:"h264-annexb",codedSize:{width:1,height:1},displaySize:{width:1,height:1},timebase:1_000_000,timestampOrigin:"source"});v.media.sendFrame({kind:"Frame",epoch:1,sequence:1n,ptsUs:1n,key:true,bytes:Uint8Array.of(1)});send(v,hello);send(v,{v:1,type:"ack",sequence:"2"});assert.deepEqual(v.ws.closes,[]);send(v,{v:1,type:"ack",sequence:"2"});assert.deepEqual(v.ws.closes,[]);send(v,{v:1,type:"ack",sequence:"3"});assert.deepEqual(v.ws.closes,[1008]);const bad=setup();send(bad,hello);send(bad,{v:1,type:"ack",sequence:"01"});assert.deepEqual(bad.ws.closes,[1008]);});
 test("rolling rate limits ACK and non-ACK independently",()=>{const a=setup();send(a,hello);for(let i=0;i<128;i++)send(a,{v:1,type:"ack",sequence:"0"});assert.deepEqual(a.ws.closes,[]);send(a,{v:1,type:"ack",sequence:"0"});assert.deepEqual(a.ws.closes,[1008]);const b=setup();send(b,hello);for(let i=0;i<31;i++)send(b,{v:1,type:"lease-renew",visible:false,creditFrames:0,creditBytes:0});assert.deepEqual(b.ws.closes,[]);send(b,{v:1,type:"lease-renew",visible:false,creditFrames:0,creditBytes:0});assert.deepEqual(b.ws.closes,[1008]);});
 test("leave closes normally and all close paths release once",()=>{const v=setup();send(v,hello);send(v,{v:1,type:"leave"});assert.deepEqual(v.ws.closes,[1000]);assert.deepEqual(v.events,["hello","visible:false","closed"]);v.ws.closed();v.ws.error();assert.equal(v.events.filter((x)=>x==="closed").length,1);});
+
+const jpegSession={kind:"SessionStarted" as const,epoch:1,codec:"mjpeg" as const,codedSize:{width:8,height:16},displaySize:{width:8,height:16},timebase:1_000_000 as const,timestampOrigin:"host-arrival" as const};
+const dual={v:1,type:"ack",sequence:"0",paintedSequence:"0"};
+test("minor1 quota is Session-bound, preserves the existing window and expires exactly at 10s",()=>{
+  const cold=setup();send(cold,hello);send(cold,dual);assert.deepEqual(cold.ws.closes,[1008]);
+  const v=setup();send(v,hello);
+  for(let i=0;i<128;i++)send(v,{v:1,type:"ack",sequence:"0"});
+  v.media.sendSession(jpegSession);
+  for(let i=128;i<1024;i++)send(v,dual);
+  assert.deepEqual(v.ws.closes,[]);send(v,dual);assert.deepEqual(v.ws.closes,[1008]);
+  const rolling=setup();send(rolling,hello);rolling.media.sendSession(jpegSession);
+  for(let i=0;i<1024;i++)send(rolling,dual);
+  rolling.clock.now=10_000;
+  for(let i=0;i<1024;i++)send(rolling,dual);
+  assert.deepEqual(rolling.ws.closes,[]);send(rolling,dual);assert.deepEqual(rolling.ws.closes,[1008]);
+});
+test("minor1 ACK fields are exact canonical u64 and non-ACK quota remains independent",()=>{
+  for(const patch of [{paintedSequence:"00"},{paintedSequence:"18446744073709551616"},{paintedSequence:0},{sequence:"-1"},{extra:1}]){
+    const v=setup();send(v,hello);v.media.sendSession(jpegSession);send(v,{...dual,...patch});assert.deepEqual(v.ws.closes,[1008]);
+  }
+  const v=setup();send(v,hello);v.media.sendSession(jpegSession);
+  v.ws.message(JSON.stringify(dual).padEnd(4096," "),false);
+  for(let i=1;i<1024;i++)send(v,dual);
+  for(let i=0;i<31;i++)send(v,{v:1,type:"lease-renew",visible:false,creditFrames:0,creditBytes:0});
+  assert.deepEqual(v.ws.closes,[]);
+  send(v,{v:1,type:"lease-renew",visible:false,creditFrames:0,creditBytes:0});assert.deepEqual(v.ws.closes,[1008]);
+  const old=setup();send(old,hello);old.media.sendSession(jpegSession);send(old,{v:1,type:"ack",sequence:"0"});assert.deepEqual(old.ws.closes,[1008]);
+});

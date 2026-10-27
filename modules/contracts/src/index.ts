@@ -1,10 +1,10 @@
-export const CONTRACT_VERSION = 1 as const;
+export const CONTRACT_VERSION = 2 as const;
 export const STREAM_PHASES = Object.freeze(["demand-pending", "starting-capture", "syncing", "streaming", "grace", "interrupted", "stopping", "stopped", "device-disconnected", "failed"] as const);
 export type StreamPhase = (typeof STREAM_PHASES)[number];
 export type StreamId = string;
-export interface DeviceRef { readonly contractVersion: 1; readonly platform: "android"; readonly namespace: string; readonly opaqueId: string }
+export interface DeviceRef { readonly contractVersion: 2; readonly platform: "android" | "ios"; readonly namespace: string; readonly opaqueId: string }
 export interface Size { readonly width: number; readonly height: number }
-export interface ViewerDescriptor { readonly contractVersion: 1; readonly streamId: StreamId; readonly standaloneUri: string; readonly presentationModes: readonly ["standalone"]; readonly expiresAt: number }
+export interface ViewerDescriptor { readonly contractVersion: 2; readonly streamId: StreamId; readonly standaloneUri: string; readonly presentationModes: readonly ["standalone"]; readonly expiresAt: number }
 
 const ERRORS = {
   "dependency-unavailable": ["service", "terminal", "failed"], "adb-incompatible": ["service", "terminal", "failed"],
@@ -65,7 +65,7 @@ const validatePresentationModes = (value: unknown): void => {
 export function validateStreamId(value: unknown): StreamId { return typeof value === "string" && UUID.test(value) ? value : fail("StreamId"); }
 export function validateDeviceRef(value: unknown): DeviceRef {
   const v = exact(value, DEVICE_KEYS);
-  if (v.contractVersion !== 1 || v.platform !== "android" || typeof v.namespace !== "string" || v.namespace.length > 64 || !NAMESPACE.test(v.namespace)) fail("DeviceRef");
+  if (v.contractVersion !== CONTRACT_VERSION || (v.platform !== "android" && v.platform !== "ios") || typeof v.namespace !== "string" || v.namespace.length > 64 || !NAMESPACE.test(v.namespace)) fail("DeviceRef");
   validateStreamId(v.opaqueId);
   return value as DeviceRef;
 }
@@ -75,7 +75,7 @@ export function validateSize(value: unknown): Size {
 }
 export function validateViewerDescriptor(value: unknown): ViewerDescriptor {
   const v = exact(value, DESCRIPTOR_KEYS); const streamId = validateStreamId(v.streamId);
-  if (v.contractVersion !== 1) fail("ViewerDescriptor"); validatePresentationModes(v.presentationModes);
+  if (v.contractVersion !== CONTRACT_VERSION) fail("ViewerDescriptor"); validatePresentationModes(v.presentationModes);
   integer(v.expiresAt, 0, Number.MAX_SAFE_INTEGER, "ViewerDescriptor");
   if (typeof v.standaloneUri !== "string") fail("ViewerDescriptor");
   const match = /^http:\/\/127\.0\.0\.1:([1-9][0-9]{0,4})\/viewer\/([0-9a-f-]+)$/.exec(v.standaloneUri as string);
@@ -130,28 +130,29 @@ export function createViewerAccess(descriptorValue: unknown, rawGrant: unknown):
 }
 export function revealViewerGrant(grant: ViewerGrant): string { return Grant.reveal(grant); }
 
-export const MEDIA_MAJOR = 1 as const, MEDIA_MINOR = 0 as const, MEDIA_HEADER_BYTES = 40 as const;
+export const MEDIA_MAJOR = 1 as const, MEDIA_HEADER_BYTES = 40 as const;
 export const MAX_PAYLOAD_BYTES = 8_388_608 as const, MAX_CONFIG_BYTES = 262_144 as const, MAX_FRAME_BYTES = 8_126_464 as const;
 export const MEDIA_KIND = Object.freeze({ session: 1, config: 2, frame: 3, gap: 4, end: 5 } as const);
 export const END_REASON = Object.freeze({ explicitStop: 1, leaseExpired: 2, deviceDisconnected: 3, failed: 4 } as const);
 export type MediaKind = (typeof MEDIA_KIND)[keyof typeof MEDIA_KIND];
-export interface MediaHeader { readonly kind: MediaKind; readonly flags: number; readonly payloadBytes: number; readonly sequence: bigint; readonly epoch: bigint; readonly ptsUs: bigint }
+export interface MediaHeader { readonly minor: 0 | 1; readonly kind: MediaKind; readonly flags: number; readonly payloadBytes: number; readonly sequence: bigint; readonly epoch: bigint; readonly ptsUs: bigint }
 const U64_MAX = (1n << 64n) - 1n, I64_MIN = -(1n << 63n), I64_MAX = (1n << 63n) - 1n;
 const validateHeader = (h: MediaHeader): void => {
+  if (h.minor !== 0 && h.minor !== 1 || h.minor === 1 && (h.kind === 2 || h.kind === 3 && (h.flags !== 1 || h.ptsUs < 0n))) fail("MediaHeader");
   if (![1, 2, 3, 4, 5].includes(h.kind) || !Number.isInteger(h.flags) || (h.kind === 3 ? h.flags < 0 || h.flags > 1 : h.flags !== 0) || !Number.isInteger(h.payloadBytes) || h.payloadBytes < 0 || h.payloadBytes > MAX_PAYLOAD_BYTES) fail("MediaHeader");
   if ((h.kind === 1 && h.payloadBytes !== 24) || (h.kind === 2 && (h.payloadBytes < 1 || h.payloadBytes > MAX_CONFIG_BYTES)) || (h.kind === 3 && (h.payloadBytes < 1 || h.payloadBytes > MAX_FRAME_BYTES)) || (h.kind === 4 && h.payloadBytes !== 12) || (h.kind === 5 && h.payloadBytes !== 4)) fail("MediaHeader");
   if (typeof h.sequence !== "bigint" || h.sequence < 1n || h.sequence > U64_MAX || typeof h.epoch !== "bigint" || h.epoch < 0n || h.epoch > U64_MAX || (h.kind !== 5 && h.epoch === 0n) || typeof h.ptsUs !== "bigint" || h.ptsUs < I64_MIN || h.ptsUs > I64_MAX || (h.kind !== 3 && h.ptsUs !== -1n)) fail("MediaHeader");
 };
 export function encodeMediaHeader(header: MediaHeader): Uint8Array {
   validateHeader(header); const bytes = new Uint8Array(MEDIA_HEADER_BYTES), view = new DataView(bytes.buffer);
-  bytes.set([0x46, 0x53, 0x51, 0x56]); view.setUint8(4, MEDIA_MAJOR); view.setUint8(5, MEDIA_MINOR); view.setUint8(6, header.kind); view.setUint8(7, header.flags); view.setUint16(8, MEDIA_HEADER_BYTES); view.setUint32(12, header.payloadBytes); view.setBigUint64(16, header.sequence); view.setBigUint64(24, header.epoch); view.setBigInt64(32, header.ptsUs);
+  bytes.set([0x46, 0x53, 0x51, 0x56]); view.setUint8(4, MEDIA_MAJOR); view.setUint8(5, header.minor); view.setUint8(6, header.kind); view.setUint8(7, header.flags); view.setUint16(8, MEDIA_HEADER_BYTES); view.setUint32(12, header.payloadBytes); view.setBigUint64(16, header.sequence); view.setBigUint64(24, header.epoch); view.setBigInt64(32, header.ptsUs);
   return bytes;
 }
 export function decodeMediaHeader(message: Uint8Array): MediaHeader {
   if (!(message instanceof Uint8Array) || message.byteLength < MEDIA_HEADER_BYTES) fail("MediaHeader");
   const view = new DataView(message.buffer, message.byteOffset, MEDIA_HEADER_BYTES);
-  if (view.getUint32(0) !== 0x46535156 || view.getUint8(4) !== MEDIA_MAJOR || view.getUint8(5) !== MEDIA_MINOR || view.getUint16(8) !== MEDIA_HEADER_BYTES || view.getUint16(10) !== 0) fail("MediaHeader");
-  const header: MediaHeader = { kind: view.getUint8(6) as MediaKind, flags: view.getUint8(7), payloadBytes: view.getUint32(12), sequence: view.getBigUint64(16), epoch: view.getBigUint64(24), ptsUs: view.getBigInt64(32) };
+  if (view.getUint32(0) !== 0x46535156 || view.getUint8(4) !== MEDIA_MAJOR || view.getUint8(5) > 1 || view.getUint16(8) !== MEDIA_HEADER_BYTES || view.getUint16(10) !== 0) fail("MediaHeader");
+  const header: MediaHeader = { minor: view.getUint8(5) as 0 | 1, kind: view.getUint8(6) as MediaKind, flags: view.getUint8(7), payloadBytes: view.getUint32(12), sequence: view.getBigUint64(16), epoch: view.getBigUint64(24), ptsUs: view.getBigInt64(32) };
   validateHeader(header); if (message.byteLength !== MEDIA_HEADER_BYTES + header.payloadBytes) fail("MediaHeader");
   return header;
 }

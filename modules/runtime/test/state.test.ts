@@ -1,6 +1,21 @@
 import assert from "node:assert/strict"; import test from "node:test";
 import { DEVICE, KEY, ensured, fixture } from "./support/runtime-fixtures.js";
 import { StateStore } from "../src/state.js";
+test("control v2 idempotency binds every identity field and rejects legacy/provider input", async () => {
+  const f = fixture(), deviceRef = { ...DEVICE, platform: "ios" as const, namespace: "fsq.devices" };
+  const first = await f.state.ensureStandaloneViewer({ deviceRef, idempotencyKey: KEY });
+  assert.ok(first.ok);
+  if (!first.ok) return;
+  assert.equal(first.value.access.descriptor.contractVersion, 2);
+  assert.deepEqual(first.value.snapshot.deviceRef, deviceRef);
+  const reordered = { opaqueId: deviceRef.opaqueId, namespace: deviceRef.namespace, platform: deviceRef.platform, contractVersion: deviceRef.contractVersion };
+  const repeated = await f.state.ensureStandaloneViewer({ deviceRef: reordered, idempotencyKey: KEY });
+  assert.equal(repeated.ok && repeated.value.access, first.value.access);
+  for (const change of [{ platform: "android" }, { namespace: "other" }, { opaqueId: "22345678-1234-4234-8234-123456789abc" }, { contractVersion: 1 }, { provider: "wda" }]) {
+    const rejected = await f.state.ensureStandaloneViewer({ deviceRef: { ...deviceRef, ...change }, idempotencyKey: KEY });
+    assert.equal(rejected.ok ? "" : rejected.error.code, "malformed-control");
+  }
+});
 test("ensure is exact, frozen, idempotent, device-bound and owner-grant limited", async () => { const f = fixture(), first = await f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: KEY }); assert.equal(first.ok, true); if (!first.ok) return; assert.equal(first.value.snapshot.revision, 1); assert.equal(first.value.snapshot.phase, "demand-pending"); assert.ok(Object.isFrozen(first)); assert.ok(Object.isFrozen(first.value)); assert.deepEqual(JSON.parse(JSON.stringify(first.value.access)), { descriptor: first.value.access.descriptor }); assert.equal(String(first.value.access.viewerGrant), "[REDACTED]"); const repeat = await f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: KEY }); assert.equal(repeat.ok && repeat.value.access, first.value.access); const changed = await f.state.ensureStandaloneViewer({ deviceRef: { ...DEVICE, opaqueId: "22345678-1234-4234-8234-123456789abc" }, idempotencyKey: KEY }); assert.equal(changed.ok ? "" : changed.error.code, "malformed-control"); f.clock.tick(60_000); const expired = await f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: KEY }); assert.equal(expired.ok ? "" : expired.error.code, "unauthorized"); });
 test("ensure rejects malformed keys and a different key for a live stream", async () => { const f = await ensured(); const malformed = await f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: "short" }); assert.equal(malformed.ok ? "" : malformed.error.code, "malformed-control"); const other = await f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: Buffer.alloc(16, 1).toString("base64url") }); assert.equal(other.ok ? "" : other.error.code, "malformed-control"); });
 test("concurrent ensure linearizes to one stream", async () => { const f = fixture(), [a,b] = await Promise.all([f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: KEY }), f.state.ensureStandaloneViewer({ deviceRef: DEVICE, idempotencyKey: KEY })]); assert.ok(a.ok && b.ok); if (a.ok && b.ok) assert.equal(a.value.snapshot.streamId, b.value.snapshot.streamId); });

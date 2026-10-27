@@ -7,8 +7,8 @@ import {
 } from "../src/index.js";
 
 const id = "123e4567-e89b-42d3-a456-426614174000";
-const device = { contractVersion: 1, platform: "android", namespace: "fsq.device-v1", opaqueId: id } as const;
-const descriptor = { contractVersion: 1, streamId: id, standaloneUri: `http://127.0.0.1:8080/viewer/${id}`, presentationModes: ["standalone"], expiresAt: 0 } as const;
+const device = { contractVersion: 2, platform: "android", namespace: "fsq.device-v1", opaqueId: id } as const;
+const descriptor = { contractVersion: 2, streamId: id, standaloneUri: `http://127.0.0.1:8080/viewer/${id}`, presentationModes: ["standalone"], expiresAt: 0 } as const;
 const snapshot = { streamId: id, deviceRef: device, revision: 1, phase: "streaming", codedSize: { width: 720, height: 1280 }, displaySize: { width: 720, height: 1280 }, activeViewerCount: 1, updatedAt: Number.MAX_SAFE_INTEGER } as const;
 const error = { code: "malformed-media", scope: "stream", disposition: "terminal", safeMessage: "Invalid media" } as const;
 const errorCases = [
@@ -34,7 +34,7 @@ function withChange<T extends object>(value: T, key: string, replacement: unknow
   return { ...value, [key]: replacement };
 }
 
-test("public serialized values validate exact v1 forms and boundaries", () => {
+test("public serialized values validate exact v2 forms and boundaries", () => {
   assert.equal(validateStreamId(id), id);
   assert.equal(validateDeviceRef(device), device);
   assert.equal(validateViewerDescriptor(descriptor), descriptor);
@@ -50,6 +50,22 @@ test("public serialized values validate exact v1 forms and boundaries", () => {
   assert.equal(validateStreamSnapshot({ ...snapshot, phase: "device-disconnected", reason: "device-disconnected", activeViewerCount: 0 }).phase, "device-disconnected");
 });
 
+test("control v2 accepts provider-neutral iOS identities and rejects legacy/provider values", () => {
+  const ios = { ...device, platform: "ios", namespace: "fsq.devices" } as const;
+  assert.equal(validateDeviceRef(ios), ios);
+  assert.equal(validateStreamSnapshot({ ...snapshot, deviceRef: ios }).deviceRef, ios);
+  for (const platform of ["macos", "IOS", "wda", "", null]) invalid(() => validateDeviceRef({ ...ios, platform }));
+  for (const contractVersion of [1, 0, 3, "2"]) {
+    invalid(() => validateDeviceRef({ ...ios, contractVersion }));
+    invalid(() => validateViewerDescriptor({ ...descriptor, contractVersion }));
+    invalid(() => validateStreamSnapshot({ ...snapshot, deviceRef: { ...ios, contractVersion } }));
+  }
+  for (const key of ["provider", "udid", "endpoint", "port", "sessionId", "path"]) {
+    invalid(() => validateDeviceRef({ ...ios, [key]: "private" }));
+    invalid(() => validateDeviceRef({ ...device, [key]: "private" }));
+  }
+});
+
 test("public validators reject malformed, coerced and additional values", () => {
   const cases: Array<() => unknown> = [
     () => validateStreamId("123E4567-e89b-42d3-a456-426614174000"),
@@ -58,7 +74,7 @@ test("public validators reject malformed, coerced and additional values", () => 
     () => validateDeviceRef(Object.assign(Object.create({}), device)),
     () => validateSize({ width: 0, height: 1 }),
     () => validateSize({ width: 1, height: 0x1_0000_0000 }),
-    () => validateViewerDescriptor(withChange(descriptor, "contractVersion", 2)),
+    () => validateViewerDescriptor(withChange(descriptor, "contractVersion", 1)),
     () => validateViewerDescriptor(withChange(descriptor, "standaloneUri", `http://localhost:8080/viewer/${id}`)),
     () => validateViewerDescriptor(withChange(descriptor, "standaloneUri", `${descriptor.standaloneUri}?grant=secret`)),
     () => validateViewerDescriptor(withChange(descriptor, "standaloneUri", `http://127.0.0.1:080/viewer/${id}`)),

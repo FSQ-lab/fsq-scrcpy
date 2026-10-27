@@ -1,35 +1,47 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { CaptureOpenError, CaptureSource, validateDeviceRef as captureValidateDeviceRef, validateStreamError as captureValidateStreamError } from "../src/index.js";
+import { CaptureOpenError, ScrcpyV501CaptureAdapter, validateDeviceRef as captureValidateDeviceRef, validateStreamError as captureValidateStreamError, type CaptureSource } from "../src/index.js";
 import { TransportError, type OwnedProcess, type TransportErrorCode } from "../src/adb/index.js";
 import type { VerifiedArtifact } from "../src/artifact/index.js";
 import type { AdbPort, ReadableTransportSocket, ScrcpyTransport } from "../src/scrcpy/transport.js";
 import { validateDeviceRef as sharedValidateDeviceRef, validateStreamError as sharedValidateStreamError } from "../../contracts/src/index.js";
 import { PIXEL_HOME, readRotationState, resolveComponent, restorePixelHome, restoreRotationState, ScenarioDeadline, validateDevicePreflight, validateSmokeAlias, waitForPackage, type RotationState } from "./real-device-smoke.js";
-const alias = "123e4567-e89b-42d3-a456-426614174000", constraints = { codec: "h264", minShortEdge: 720, maxFps: 30, bitRate: 8_000_000, noCrop: true, noUpscale: true } as const, deviceRef = { contractVersion: 1, platform: "android", namespace: "fsq.android.local", opaqueId: alias } as const;
+const alias = "123e4567-e89b-42d3-a456-426614174000", deviceRef = { contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: alias } as const;
 const config = { adbPath: "/adb", cacheRoot: "/cache", deviceRegistry: [{ opaqueId: alias, serial: "SERIAL" }], artifactSource: { mode: "online" } } as const;
 class Socket implements ReadableTransportSocket { private release?: () => void; on(): this { return this; } pause(): this { return this; } resume(): this { return this; } read(): Uint8Array | null { return null; } destroy(): this { this.release?.(); return this; } async *[Symbol.asyncIterator](): AsyncIterator<Uint8Array> { yield Uint8Array.of(0x68, 0x32, 0x36, 0x34); await new Promise<void>((done) => { this.release = done; }); } }
 class Client implements AdbPort { async run(_serial: string | undefined, _args: readonly string[], _timeout: number, _failure: TransportErrorCode): Promise<{ stdout: string; stderr: string }> { return { stdout: "device\n", stderr: "" }; } start(): OwnedProcess { throw new Error("unused"); } }
-function hooks(error?: TransportError) { const calls: string[] = [], client = new Client(), socket = new Socket(), transport: ScrcpyTransport = { socket, scid: "1", socketName: "s", remotePath: "r", close: async () => { calls.push("close"); socket.destroy(); return []; } }, artifact = {} as VerifiedArtifact; return { calls, value: { acquire: async () => { calls.push("artifact"); return artifact; }, probe: async (opaqueId: string, registry: readonly unknown[], adbPath?: string) => { calls.push(`probe:${opaqueId}:${registry.length}:${adbPath}`); if (error) throw error; return { client, serial: "SERIAL", version: "adb" }; }, transport: async () => { calls.push("transport"); return transport; } } as NonNullable<ConstructorParameters<typeof CaptureSource>[1]> };
+function hooks(error?: TransportError) { const calls: string[] = [], client = new Client(), socket = new Socket(), transport: ScrcpyTransport = { socket, scid: "1", socketName: "s", remotePath: "r", close: async () => { calls.push("close"); socket.destroy(); return []; } }, artifact = {} as VerifiedArtifact; return { calls, value: { acquire: async () => { calls.push("artifact"); return artifact; }, probe: async (opaqueId: string, registry: readonly unknown[], adbPath?: string) => { calls.push(`probe:${opaqueId}:${registry.length}:${adbPath}`); if (error) throw error; return { client, serial: "SERIAL", version: "adb" }; }, transport: async () => { calls.push("transport"); return transport; } } as NonNullable<ConstructorParameters<typeof ScrcpyV501CaptureAdapter>[1]> };
 }
-const open = (source: CaptureSource, value: unknown = { deviceRef, videoConstraints: constraints }, signal?: AbortSignal) => source.open(value, signal);
+const open = (source: ScrcpyV501CaptureAdapter, value: unknown = { deviceRef }, signal?: AbortSignal) => source.open(value, signal);
 
 await test("validates exact config/request and composes artifact, ADB and transport seams", async () => {
-  const fake = hooks(), source = new CaptureSource(config, fake.value), capture = await open(source); assert.deepEqual(fake.calls, ["artifact", `probe:${alias}:1:/adb`, "transport"]); await capture.stop(); assert.equal(fake.calls.at(-1), "close");
+  const fake = hooks(), source: CaptureSource = new ScrcpyV501CaptureAdapter(config, fake.value), capture = await source.open({ deviceRef }); assert.deepEqual(fake.calls, ["artifact", `probe:${alias}:1:/adb`, "transport"]); await capture.stop("explicit-stop"); assert.equal(fake.calls.at(-1), "close");
 });
 
-await test("rejects non-exact config, paths, registries, requests and constraints before side effects", async () => {
-  for (const value of [{ ...config, extra: true }, { ...config, cacheRoot: "relative" }, { ...config, adbPath: "adb" }, { ...config, deviceRegistry: [{ opaqueId: "bad", serial: "S" }] }, { ...config, deviceRegistry: [{ opaqueId: alias, serial: "" }] }, Object.create(config)]) assert.throws(() => new CaptureSource(value), CaptureOpenError);
-  const fake = hooks(), source = new CaptureSource(config, fake.value), badRequests: unknown[] = [{ deviceRef: { ...deviceRef, opaqueId: "bad" }, videoConstraints: constraints }, { deviceRef, videoConstraints: { ...constraints, maxFps: 31 } }, { deviceRef, videoConstraints: { ...constraints, extra: true } }, { deviceRef: { ...deviceRef, namespace: "other" }, videoConstraints: constraints }, { deviceRef, videoConstraints: constraints, extra: true }]; for (const value of badRequests) await assert.rejects(() => open(source, value), CaptureOpenError); assert.deepEqual(fake.calls, []);
+await test("rejects non-exact config and request, legacy constraints and mismatched identities before side effects", async () => {
+  for (const value of [{ ...config, extra: true }, { ...config, cacheRoot: "relative" }, { ...config, adbPath: "adb" }, { ...config, deviceRegistry: [{ opaqueId: "bad", serial: "S" }] }, { ...config, deviceRegistry: [{ opaqueId: alias, serial: "" }] }, Object.create(config)]) assert.throws(() => new ScrcpyV501CaptureAdapter(value), CaptureOpenError);
+  const fake = hooks(), source = new ScrcpyV501CaptureAdapter(config, fake.value);
+  const badRequests: unknown[] = [
+    {}, { deviceRef: { ...deviceRef, opaqueId: "bad" } },
+    { deviceRef, videoConstraints: { codec: "h264", minShortEdge: 720, maxFps: 30, bitRate: 8_000_000, noCrop: true, noUpscale: true } },
+    { deviceRef: { ...deviceRef, contractVersion: 1 } },
+    { deviceRef: { ...deviceRef, namespace: "other" } },
+    { deviceRef: { ...deviceRef, platform: "ios" } },
+    { deviceRef: { ...deviceRef, platform: "wda" } },
+    { deviceRef: { ...deviceRef, provider: "scrcpy" } },
+    { deviceRef, extra: true }, Object.create({ deviceRef })
+  ];
+  for (const value of badRequests) await assert.rejects(() => open(source, value), CaptureOpenError);
+  assert.deepEqual(fake.calls, []);
 });
 
 await test("maps setup failures safely and honors pre-aborted cancellation", async () => {
-  const failed = hooks(new TransportError("device-not-found")), source = new CaptureSource(config, failed.value); await assert.rejects(() => open(source), (error: unknown) => error instanceof CaptureOpenError && error.error.code === "device-not-found" && !error.message.includes("SERIAL") && !error.message.includes("/")); const controller = new AbortController(); controller.abort(); const untouched = hooks(); await assert.rejects(() => open(new CaptureSource(config, untouched.value), undefined, controller.signal), CaptureOpenError); assert.deepEqual(untouched.calls, []);
+  const failed = hooks(new TransportError("device-not-found")), source = new ScrcpyV501CaptureAdapter(config, failed.value); await assert.rejects(() => open(source), (error: unknown) => error instanceof CaptureOpenError && error.error.code === "device-not-found" && !error.message.includes("SERIAL") && !error.message.includes("/")); const controller = new AbortController(); controller.abort(); const untouched = hooks(); await assert.rejects(() => open(new ScrcpyV501CaptureAdapter(config, untouched.value), undefined, controller.signal), CaptureOpenError); assert.deepEqual(untouched.calls, []);
 });
 
 await test("re-exports the accepted Contracts validators and propagates cancellation before later setup effects", async () => {
   assert.equal(captureValidateDeviceRef, sharedValidateDeviceRef); assert.equal(captureValidateStreamError, sharedValidateStreamError); assert.equal(captureValidateDeviceRef(deviceRef), deviceRef); const calls: string[] = []; assert.throws(() => validateSmokeAlias("not-canonical")); assert.equal(calls.length, 0);
-  const controller = new AbortController(), base = hooks(), value = { ...base.value, acquire: async (_root: string, _source: unknown, signal?: AbortSignal) => { calls.push("artifact"); assert.equal(signal, controller.signal); controller.abort(); return {} as VerifiedArtifact; }, probe: async () => { calls.push("probe"); throw new Error("unreachable"); } } as NonNullable<ConstructorParameters<typeof CaptureSource>[1]>; await assert.rejects(() => open(new CaptureSource(config, value), undefined, controller.signal), CaptureOpenError); assert.deepEqual(calls, ["artifact"]);
+  const controller = new AbortController(), base = hooks(), value = { ...base.value, acquire: async (_root: string, _source: unknown, signal?: AbortSignal) => { calls.push("artifact"); assert.equal(signal, controller.signal); controller.abort(); return {} as VerifiedArtifact; }, probe: async () => { calls.push("probe"); throw new Error("unreachable"); } } as NonNullable<ConstructorParameters<typeof ScrcpyV501CaptureAdapter>[1]>; await assert.rejects(() => open(new ScrcpyV501CaptureAdapter(config, value), undefined, controller.signal), CaptureOpenError); assert.deepEqual(calls, ["artifact"]);
 });
 
 await test("reserves cleanup time inside one monotonic scenario deadline", () => {

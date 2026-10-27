@@ -155,3 +155,31 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - Runtime calls idempotent Capture stop when applicable, awaits its cached `closed()` result, records but does not replace the winner on mismatch/cleanup error, releases queued-unsent application media and logical ownership, and retains every accepted pending-send byte until callback or forced close. It then enqueues at most one END if an authenticated socket exists; END bypasses Frame credit, consumes control/total capacity from the 64-KiB reserve and remains pending-owned until callback/close.
 - END send has a one-second callback deadline. Success closes 1000; timeout/send error destroys/closes 1011. No media/control envelope follows END. Runtime then closes HTTP/WS resources, continues all cleanup, and publishes exactly one frozen terminal snapshot as the final revision; inspect cannot observe terminal before producer fencing and Capture reconciliation complete.
 
+## iOS WDA Standalone Contract
+
+本节为 MJPEG 对既有 H.264 retained-config、send-time streaming、ACK 与恢复规则的 codec-specific 增量；既有鉴权、租约和统一终止规则保持有效。
+
+- composition root 显式配置唯一 CaptureSource；open 仅传 DeviceRef/cancellation，不传平台策略。Control values 与 idempotency canonical bytes 全部使用 v2。
+- MJPEG 使用 FSQV minor 1，无 Config；拒绝非 key、非法 codec/epoch/order/size。只保留当前 Session，H.264 继续保留 Session+Config。
+- 每 Viewer 最多一个未分配序列的 MJPEG staging slot、一个 assigned outstanding Frame。仅 staging 可 latest-wins；分配序列后不可替换，callback 与 ACK/GAP/terminal ownership 按既有路径释放。普通 replacement 不产生 GAP，不消耗 sequence/credit。
+- staging、assigned logical Frame references、application/control queues、pending send 与 WebSocket transport pressure 纳入同一 8 MiB ownership 上限，保留 64 KiB control reserve。沿用 transport pressure=max(pendingSendBytes,bufferedAmount)，重叠所有权不得漏计。替换原子检查 `owned-oldStaging+candidate`；超媒体 ceiling 立即释放 candidate 并计 drop，不保留两份，不分配 sequence/credit。admission 原子移走 slot 后只调用一次 sendFrame。最大 assigned Frame 可使 staging 无容量，此时丢弃输入。
+- reconfiguration 先丢旧 staging，再 reason-3 GAP 覆盖被撤销的最高 assigned 旧 Frame sequence 并释放 watermark 内所有权；之后只接受更高 epoch Session→key JPEG。H.264 Session→Config→key 不变；END 后无媒体。
+- Minor-1 exact ACK 验证 sequence/paintedSequence，跟踪已发送 Frame sequence→epoch；未知、未来、回退 paint 拒绝，重复幂等，仅当前 epoch advancement 刷新 paint 时间。release ACK 不证明 Live。
+- 首次有效 authenticated hello 后 `lease-renew visible:true` 线性化时启动五秒 first-paint deadline。仅当前 epoch painted ACK 成功；deadline 到达以 start-timeout 赢得统一终止，fence Capture、END failed、最终 snapshot；晚 ACK 不复活。
+- MJPEG streaming 只在有效当前 epoch painted ACK 后发布。最近 paint 后恰好 2 秒同步退出 streaming，发布 interrupted/stream-interrupted；12 秒前新 paint 经 syncing 回 streaming；12 秒到达 terminal failed/stream-interrupted，关闭 FSQ source，重试必须新 StreamId。source HTTP idle 也是 12 秒，不得更早。
+- grace 暂停 freshness timer，页面已非 Live；五秒 grace 内返回进入 syncing 并重启 12 秒 fresh-paint deadline；首次启动仍受五秒约束。epoch change 同步退出 Live，旧 epoch ACK 不恢复。
+- EOF/reset 不证明设备拔除；stream-interrupted→failed。first-cause、producer fencing、一次 END/final snapshot、callback/ACK 释放、grants/leases 清理继续适用，不停止外部自动化。
+
+## ACK/profile Contract
+
+本节覆盖上文相应 ACK 限额/校验、Runtime 构造及 Viewer bootstrap 条款，既有安全/租约和5s/2s/12s目标不变。
+
+- 连接在接受 MJPEG minor1 Session 后允许1024 ACK/rolling10s；minor0及尚未绑定模式的冷启动保持128，non-ACK保持32、文本保持4096字节。窗口为 `(now-10000,now]`；所有重复/零值/release-only/旧 epoch ACK均计数，超额1008；额度改变不清空既有窗口，客户端不能通过添加paint字段选额。冷启动不开放minor1四字段 ACK。1024为控制面滥用上限，不是FPS承诺或合法突发永不被关的保证。
+- 完整双水位作无副作用校验后，才能原子提交 ACK/paint、释放credit/bytes及允许下次发送；非法paint不得先调用会释放/flush的旧ack路径。只有当前epoch且当前可见周期合格的新paint advancement更新freshness；ACK本身不续租。新可见周期丢弃旧staging并记录既有assigned序列界线，界线内旧ACK只清理、不恢复Live，返回后需新鲜Frame paint。
+- 每连接最多1024条尚未被累计ACK确认的已发送Frame证明记录，只含sequence/epoch/发送状态等有界元数据，不持有JPEG。正常ACK回收，GAP撤销但未确认的记录留待在途ACK核对；仅最近接受paint的标量保留用于重复校验。新Frame分配sequence前检查容量，满额走runtime-overload统一终止，不能静默遗忘证明。连接fence后旧记录不能作用于新连接。
+- 下一张MJPEG的assignment必须同时等待前一张callback与ACK/GAP/terminal所有权释放；至多一staging、一assigned、连续envelope序列、8MiB去重总所有权和64KiB control reserve不变。schema/order/rate/未知paint关闭Viewer1008，oversize1009，内部transport1011；既有grace/first-cause路径不变，不伪装成source断线或设备拔除。
+- 在ACK线性化处重新检查单调deadline；达到5秒启动或12秒freshness终止界线后，晚ACK不能因timer callback延迟而复活流。grace内不刷新可见freshness；epoch/可见周期变化清除Live资格。END/final snapshot仍恰好一次，之后不再admit媒体。
+- `RuntimeServiceOptions.mediaProfile`必填且仅为`"h264-annexb"|"mjpeg"`，在构造时私有复制为不可变配置；缺失/非法值在bind或Capture分配前抛出固定本地`TypeError("Invalid media profile")`。不新增序列化错误、兼容默认值、platform推断、source registry或fallback；所有当前构造调用方同步迁移。composition root负责选取匹配的固定CaptureSource，Runtime对不匹配的首个或后续Session codec以malformed-media终止。
+- 既有no-store Viewer HTML根元素恰好提供一个经枚举验证的`data-media-profile="h264-annexb"`或`data-media-profile="mjpeg"`属性，供Main在demand前读取。不进入DeviceRef、ViewerDescriptor、URL、bearer或provider locator；既有route/manifest/CSP/Host/Origin/pairing边界不变。精确Main/Worker preflight协议由Viewer同名delta拥有。
+
+

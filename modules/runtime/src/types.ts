@@ -1,4 +1,5 @@
 import type { DeviceRef, StreamError, StreamId, StreamSnapshot, ViewerAccess, ViewerGrant } from "../../contracts/src/index.js";
+export type MediaProfile = "h264-annexb" | "mjpeg";
 export type EnsureRequest = Readonly<{ deviceRef: DeviceRef; idempotencyKey: string }>;
 export type ApproveRequest = Readonly<{ streamId: StreamId; pairingId: string; pairingCode: string; viewerGrant: ViewerGrant }>;
 export type InspectRequest = Readonly<{ streamId: StreamId; afterRevision?: number }>;

@@ -82,3 +82,17 @@ Appium_connect_agent Adapter ───────► Runtime public interface
 - Runtime prerequisite and exact dependency selection are maintained in [the approved selection record](docs/tasks/2026-10-23-runtime-dependency-selection.md): Node.js 24.22.1 LTS, production `ws@8.22.0` and `openpgp@6.3.2`, and the exact development dependency set recorded there. Actual lock closure and licenses must be verified before implementation Ready.
 - Audio, recording, remote/cloud access, multiple devices/streams/Viewers, iOS/macOS Capture, Viewer control, external launch/attach and MCP App implementation are outside the current v1 standalone contract. Each addition requires its own SPEC delta and real validation.
 
+## iOS WDA Standalone Contract
+
+本节及模块 SPEC 中同名契约定义 `IOS-WDA-STANDALONE-01`。本节的适用范围优先于上文仅 Android/control v1 的限制，Android 媒体与质量契约不变。
+
+- 平台组合：macOS arm64 本地宿主、一个 USB iPhone、外部已运行的 WDA v16.15.3、外部已建立的 loopback USB forward、单流及一个 standalone Chrome Viewer。支持矩阵保持为空。
+- WDA-first；非 WDA Adapter、Agent launch/attach、MCP App、其他平台和 `IOS-WDA-LIFECYCLE-02` 不属于本次实现范围。
+- FSQ attach-only，不安装、签名、启动、停止或配置 WDA，不建立或管理 USB forward，不发送 WebDriver/Settings 命令，不管理 Appium Session，不修改 `Appium_connect_agent`。观察与自动化生命周期独立。
+- Contracts control v2 全仓 clean cutover，支持 provider-neutral `android|ios` 身份；不保留 v1 alias、validator 或升级 shim。外部跨进程控制协议仍未定义。
+- iOS 唯一数值媒体目标：健康且已准备的源，从首次有效 authenticated visible demand 到当前 epoch 首次 fresh painted ACK ≤5 秒。没有分辨率、FPS 或 glass-to-glass 延迟承诺。
+- MJPEG 2 秒无新鲜 paint 离开 Live；12 秒无新鲜 paint 终止。无同 StreamId source restart。关闭 FSQ 只释放其拥有的资源，WDA、forward 和自动化不受影响。
+- 生产依赖新增精确 `exifr@7.1.3`，仅内存 JPEG EXIF orientation；有界 WDA 专用 multipart/JPEG SOF 解析为已批准自研例外。实际包/API、完整性、许可证和 lock closure 仍须在 implementation Ready 前核验。
+- 帧只在内存；WDA endpoint、UDID、Session ID、provider locator/error 不进入公共契约、日志、模型输出或 Viewer URL。浏览器只连接受保护 FSQ origin。
+- 详细契约由四个模块 SPEC 的同名契约定义；既有 loopback、pairing、capability、Host/Origin、CSP、五秒 Viewer grace、first-cause terminalization 和 Android 约束保持有效。
+

@@ -1,10 +1,10 @@
-export declare const CONTRACT_VERSION: 1;
+export declare const CONTRACT_VERSION: 2;
 export declare const STREAM_PHASES: readonly ["demand-pending", "starting-capture", "syncing", "streaming", "grace", "interrupted", "stopping", "stopped", "device-disconnected", "failed"];
 export type StreamPhase = (typeof STREAM_PHASES)[number];
 export type StreamId = string;
 export interface DeviceRef {
-    readonly contractVersion: 1;
-    readonly platform: "android";
+    readonly contractVersion: 2;
+    readonly platform: "android" | "ios";
     readonly namespace: string;
     readonly opaqueId: string;
 }
@@ -13,7 +13,7 @@ export interface Size {
     readonly height: number;
 }
 export interface ViewerDescriptor {
-    readonly contractVersion: 1;
+    readonly contractVersion: 2;
     readonly streamId: StreamId;
     readonly standaloneUri: string;
     readonly presentationModes: readonly ["standalone"];
@@ -101,7 +101,7 @@ export interface ViewerAccess {
 }
 export declare function createViewerAccess(descriptorValue: unknown, rawGrant: unknown): ViewerAccess;
 export declare function revealViewerGrant(grant: ViewerGrant): string;
-export declare const MEDIA_MAJOR: 1, MEDIA_MINOR: 0, MEDIA_HEADER_BYTES: 40;
+export declare const MEDIA_MAJOR: 1, MEDIA_HEADER_BYTES: 40;
 export declare const MAX_PAYLOAD_BYTES: 8388608, MAX_CONFIG_BYTES: 262144, MAX_FRAME_BYTES: 8126464;
 export declare const MEDIA_KIND: Readonly<{
     readonly session: 1;
@@ -118,6 +118,7 @@ export declare const END_REASON: Readonly<{
 }>;
 export type MediaKind = (typeof MEDIA_KIND)[keyof typeof MEDIA_KIND];
 export interface MediaHeader {
+    readonly minor: 0 | 1;
     readonly kind: MediaKind;
     readonly flags: number;
     readonly payloadBytes: number;
