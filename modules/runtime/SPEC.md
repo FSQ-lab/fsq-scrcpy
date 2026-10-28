@@ -354,3 +354,54 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - process tests用deterministic clock覆盖winner bind-before-ready、loser EADDRINUSE、parent death与cancel在READY_PUBLISHED两侧、TERM/KILL/reap、response loss、shutdown/new starter race；任何路径最多一个authenticated Runtime，所有non-winner child reaped，ready/ensure在visible demand前Capture.open计数为0。
 - HTTP tests覆盖8/9 slow pre-auth raw sockets、8/9 authenticated keep-alive sockets、8/9 in-flight、pipeline、5秒header/body/idle、64/65 requests/socket、duplicate Host/Auth、invalid token、wrong authority与计数异常close归零；auth失败不得触发route/body/identity parser。
 - 真实macOS arm64/USB Android入口使用temporary RuntimeControl client：并发fresh start/attach只一个ready pair和Runtime；ordinary bearer实测owner route 401；真实Viewer Live；client退出后attach得到同一StreamId；stop只停流；ensure/stop response-loss后可按各自契约协调而approve response-loss保持state-unknown且不重放；owner shutdown清理matching generation；shutdown并发starter不能遭old cleanup ABA；输出/state scan无serial/path/credential/grant/frame。该feature通过不代表CLI/MCP/Windows/iOS或support matrix。
+
+## macOS Android CLI Owner-Local Delta
+
+本节定义用户已确认的 `ANDROID-CLI-MACOS-03` 窄Runtime增量。既有control HTTP wire、ControlVersion、六条route、ordinary `RuntimeControlSession`、Contracts/Capture/Viewer均no-delta。
+
+### Owner-local seam
+
+- Runtime新增dedicated owner-local submodule；它导出且只允许Integrations CLI组合根使用`createRuntimeOwnerLocal(): RuntimeOwnerLocal`，不从ordinary Runtime index或serialized值导出。factory不接受path/port/credential/binding；Integrations不得接触`LocalRuntimeState`、`OwnerHttpControl`或Capture private access。
+
+  ```text
+  RuntimeOwnerLocal:
+    inspectLocalState({platform:"android"},{signal?}) -> OwnerLocalResult<LocalStateStatusValue>
+    approveViewerPairing({deviceRef,streamId,pairingCode},{signal?}) -> ControlResult<ApproveViewerValue>
+    shutdownRuntime({deviceRef},{signal?}) -> ControlResult<ShutdownRuntimeValue>
+    resetControlState({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<ResetControlStateValue>
+    rebindDevice({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<RebindDeviceValue>
+    close()/asyncDispose -> Promise<void>
+
+  LocalStateStatusValue =
+    {platform:"android",state:"uninitialized"}
+    | {platform:"android",state:"ready",deviceRef,stateRevision,
+       runtime:{state:"not-running"}|{state:"live",target:{instanceId,generation}}}
+  ResetControlStateValue =
+    {platform:"android",deviceRef,previousStateRevision,stateRevision}
+  RebindDeviceValue =
+    {platform:"android",previousDeviceRef,deviceRef,previousStateRevision,stateRevision}
+
+  RuntimeLiveError = exact frozen {
+    code:"runtime-live", disposition:"terminal", operationState:"not-applied",
+    safeMessage:"A matching Runtime is still running."
+  }
+  OwnerMaintenanceError = ControlError | RuntimeLiveError
+  OwnerLocalResult<T> = {ok:true,value:T} | {ok:false,error:OwnerMaintenanceError}
+  ```
+
+  owner-local validator拥有并严格验证`RuntimeLiveError`和所有local success exact shape；ControlError分支继续调用Contracts validator。它们都不是`ControlWireValue`，不扩展wire error集合；session/object的enumeration、JSON与inspect不得显示内部字段，close只释放本地socket/handle，不stop stream/Runtime。
+- `inspectLocalState`只读返回`uninitialized`，或`ready{deviceRef,stateRevision,runtime:not-running|live{target}}`。不存在时不mkdir；valid slot加authenticated exact hello才是live；明确ECONNREFUSED才是point-in-time not-running。wrong auth/identity/version、timeout、partial/corrupt/ambiguous state均返回`local-state-recovery-required`。
+- approve/shutdown内部由strict-valid slot/generation取得owner authority，以输入完整DeviceRef重新校验并绑定authenticated current target后调用既有owner route；TOCTOU产生既有safe conflict/unknown结果。任何port、credential、target locator或state path均不返回Integrations。approve输入另含streamId/code；shutdown target不由CLI提供。
+- `resetControlState`保留DeviceRef/binding，生成fresh credential/port；`rebindDevice`先经既有private resolver证明恰好一台已授权设备，再生成fresh DeviceRef/binding/credential/port。成功均使revision恰加一；无slot为instance-not-found，stale identity/revision为instance-conflict，matching live为上述RuntimeLiveError。
+
+### State replacement and linearization
+
+- Slot `stateVersion`保持1；`revision`由固定1改为从1开始的正safe-integer mutation counter，reset/rebind成功恰加一，溢出fail closed；createdAt保持，updatedAt更新。
+- Mutation严格验证expected tuple与slot/generation。authenticated matching Runtime存在则拒绝；只有ECONNREFUSED后成功exclusive bind并持续占有old port才可继续。occupied/wrong-auth/wrong-identity/version/timeout及bind race均fail closed，不kill或替换任何listener。
+- 同时reserve一个不同fresh port。持有双reservation后重新CAS读取完整old canonical slot，compare-delete exact stale generation并fsync runtime directory；generation损坏不修复。随后同目录0600 exclusive temp完整写入→file sync→close→再次CAS old final bytes/identity→atomic rename over final→devices directory sync是唯一commit；成功后generation absent，操作不spawn Runtime。
+- acquire/child在contention/readiness后必须重读current slot revision并以fresh authority完成最终hello；maintenance reservation与revision CAS防止reset/reset、reset/rebind及acquire/reset split brain。旧cleanup只能删除exact old generation，不能删除new generation。
+- In-process cancel在rename前保持old slot authoritative；rename线性化后不回滚，继续fsync/cleanup并返回success。Process/power crash在rename前只可能保留old strict-valid final；rename后但devices directory sync前，重启以实际可见的strict-valid old或new final为唯一authority（old=`not-applied`，new=`applied`），清理owned stale temp并sync；invalid/ambiguous组合返回`local-state-recovery-required`。directory sync后new slot durable。generation缺失沿既有安全重建；temp/handle/socket/promise在正常return前settle。
+
+### Verification boundary
+
+Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout、slot revision与authority rotation、generation删除及每个write/sync/close/CAS/rename crash点、reset/reset、reset/rebind、acquire/reset、child/maintenance ABA和pre/post-rename cancellation；所有safe result/inspect/log不得含serial/path/port/credential/binding/PID/grant。真实reset/rebind验收由Integrations同名contract拥有。

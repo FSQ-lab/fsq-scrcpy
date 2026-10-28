@@ -3,6 +3,16 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "bin": {
+    "fsq-scrcpy": ".build/integrations/src/bin.js"
+  },
+  "files": [
+    ".build/integrations/src",
+    ".build/runtime/src",
+    ".build/contracts/src",
+    ".build/capture/src",
+    "modules/viewer/dist"
+  ],
   "engines": {
     "node": "24.22.1",
     "npm": "11.19.1"
@@ -51,7 +61,11 @@
     "build:viewer": "node modules/viewer/build.mjs",
     "test:viewer": "tsc -p modules/viewer/tsconfig.json && node modules/viewer/build.mjs --protocol-only && node --test .build/viewer/viewer/test/assets.test.js .build/viewer/viewer/test/protocol.test.js .build/viewer/viewer/test/worker.test.js && npm run build:viewer && node --test .build/viewer/viewer/test/app.test.js .build/viewer/viewer/test/integration.test.js .build/viewer/viewer/test/render.test.js .build/viewer/viewer/test/state.test.js",
     "verify:viewer": "npm run typecheck:viewer && npm run test:viewer",
-    "serve:viewer:real": "npm run build:viewer && tsc -p modules/viewer/tsconfig.json && node .build/viewer/viewer/test/real-viewer-server.js"
+    "serve:viewer:real": "npm run build:viewer && tsc -p modules/viewer/tsconfig.json && node .build/viewer/viewer/test/real-viewer-server.js",
+    "build:integrations": "npm run build:viewer && tsc -p modules/integrations/tsconfig.json",
+    "typecheck:integrations": "tsc --noEmit -p modules/integrations/tsconfig.json",
+    "test:integrations": "npm run build:integrations && node --test .build/integrations/test/*.test.js",
+    "verify:integrations": "npm run typecheck:integrations && npm run test:integrations"
   },
   "dependencies": {
     "exifr": "7.1.3",

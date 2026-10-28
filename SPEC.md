@@ -14,6 +14,7 @@
 | Capture | 平台视频源接入及编码流获取 | [modules/capture/SPEC.md](modules/capture/SPEC.md) |
 | Runtime | 本地流服务、生命周期、分发及外部启动/连接 seam | [modules/runtime/SPEC.md](modules/runtime/SPEC.md) |
 | Viewer | 独立 Web Viewer、MCP App 展示和 URL fallback | [modules/viewer/SPEC.md](modules/viewer/SPEC.md) |
+| Integrations | Packaged CLI/MCP Adapters、命令呈现与宿主集成 | [modules/integrations/SPEC.md](modules/integrations/SPEC.md) |
 
 ## Architecture Diagram
 
@@ -39,6 +40,8 @@ Appium_connect_agent Adapter ───────► Runtime public interface
 ```
 
 依赖方向为 `Capture → Contracts`、`Runtime → Capture + Contracts`、`Viewer → Runtime + Contracts`。外部 Adapter 只依赖公开接口；本项目不依赖 `Appium_connect_agent` 内部实现。
+
+The dependency graph additionally permits only `Integrations → Runtime + Contracts`; Capture/Runtime/Viewer do not depend on Integrations.
 
 ## Confirmed Product Scope
 
@@ -117,3 +120,14 @@ Appium_connect_agent Adapter ───────► Runtime public interface
 - Agent-safe结果只含Contracts-owned control值、`ViewerDescriptor`与`StreamSnapshot`；Android serial、路径、artifact locator、root/client/owner credential、ViewerGrant、pairingId、PID和原异常不进入普通结果、日志、URL、模型上下文或遥测。
 - 本feature支持acquire/start-or-attach、ensure、inspect、stop stream、owner pairing approval和owner Runtime shutdown；不支持wait/watch、state维护命令、远程、多个设备/流/Viewer或Model Context Protocol。
 - Contracts/Runtime同名契约固定wire schema、canonical bytes、认证顺序、semantic ensure key/grant生命周期、错误tuple/deadline、crash-durable filesystem状态、spawn/bind/ready/attach与ABA规则。Capture/Viewer行为no-delta。
+
+## macOS Android CLI v1
+
+本节定义用户已确认的 `ANDROID-CLI-MACOS-03` SPEC delta。
+
+- 平台组合固定为本地 macOS arm64、恰好一台已授权 USB Android、已验收 RuntimeControl 与 standalone Chrome Viewer。新增 private npm package 内的 `fsq-scrcpy` executable，不发布、不建立支持矩阵条目。
+- CLI 提供 automatic/known Viewer ensure、attach-only inspect/stop、owner pairing approval、owner Runtime shutdown、只读 local-state status 及人工确认的 reset-control/rebind-device；wait/watch、MCP、Windows、iOS 与 embedded Viewer 不在范围内。
+- Integrations 只拥有 strict `node:util.parseArgs` 语法、TTY确认、human/JSON rendering、exit status 与 executable packaging；Runtime 深模块继续拥有身份、authority、process及本机状态。Contracts/Capture/Viewer no-delta，不新增control HTTP route或依赖。
+- 现设计中“Runtime interface unchanged”仅适用于HTTP wire与ordinary RuntimeControl；owner recovery使用Runtime同名narrow owner-local maintenance seam，禁止CLI直接读取私有文件或取得serial/path/port/credential/binding。
+- 普通client退出不停止stream/Runtime；stream stop保持Runtime监听；仅显式owner shutdown停止Runtime。所有输出沿用safe DTO，媒体与provider/authority私有值禁止进入stdout、stderr、prompt、argv、日志或模型上下文。
+- Exact command/result/confirmation/packaging/privacy与真实验收由 [Integrations SPEC](modules/integrations/SPEC.md) 定义；Runtime slot replacement、并发、crash/cancel/ABA由Runtime同名delta定义。

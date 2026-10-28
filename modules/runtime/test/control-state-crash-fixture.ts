@@ -29,6 +29,14 @@ if (point === "slot-link-error") {
     process.exit(0);
   } catch { process.exit(92); }
 }
+if (point.startsWith("replacement-")) {
+  const slot = (await state.initialize(binding, 1_800_000_000_000)).slot;
+  const generation = Object.freeze({ runtimeStateVersion: 1 as const, deviceRef: slot.deviceRef, instanceId: "123e4567-e89b-42d3-a456-426614174000", generation: "223e4567-e89b-42d3-a456-426614174000", port: slot.control.port, createdAt: 1_800_000_000_001, ready: true as const });
+  await state.publishGeneration(generation);
+  await state.replaceSlot(slot, generation, binding, slot.deviceRef, 1_800_000_000_002);
+  process.exit(0);
+}
+
 
 const slot = (await state.initialize(binding, 1_800_000_000_000)).slot;
 const value = Object.freeze({ runtimeStateVersion: 1 as const, deviceRef: slot.deviceRef, instanceId: "123e4567-e89b-42d3-a456-426614174000", generation: "223e4567-e89b-42d3-a456-426614174000", port: slot.control.port, createdAt: 1_800_000_000_001, ready: true as const });

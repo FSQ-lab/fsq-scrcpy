@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { createServer } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
 import { LocalRuntimeState, LocalStateFailure, controlStateInternals, type AndroidRuntimeSlot, type RuntimeGenerationState } from "../src/control-state.js";
@@ -98,7 +99,6 @@ await test("slot parser rejects noncanonical order, extra fields and wrong root 
       `${JSON.stringify(original)}\n`,
       JSON.stringify({ ...original, deviceRef: { ...(original.deviceRef as object), opaqueId: randomUUID().toUpperCase() } }),
       JSON.stringify({ ...original, binding: { ...(original.binding as object), adbPath: "relative/adb" } }),
-      JSON.stringify({ ...original, updatedAt: (original.updatedAt as number) + 1 }),
     ];
     for (const source of variants) {
       await writeFile(fixture.state.slotPath, source, { mode: 0o600 });
@@ -306,3 +306,84 @@ await test("validated directory replacement is rejected by pinned inode identity
 
 
 await test("EEXIST loser adopts winner and ENOENT retries a fresh candidate",async()=>{for(const mode of ["EEXIST","ENOENT"]as const){const fixture=await temporary();let calls=0;try{const result=await fixture.state.initialize(BINDING,1_800_000_000_000,undefined,{link:async(source,destination)=>{calls++;if(calls===1){if(mode==="EEXIST")await link(source,destination);throw Object.assign(new Error(mode),{code:mode});}await link(source,destination);}});assert.ok(result.slot);assert.equal(calls,mode==="EEXIST"?1:2);assert.deepEqual(await readdir(fixture.state.devices),["android-only.json"]);}finally{await fixture.close();}}});
+
+await test("slot parser accepts canonical positive revisions and rejects zero overflow and time regression", async () => {
+  const fixture = await initialized();
+  try {
+    const base = JSON.parse(controlStateInternals.canonicalSlot(fixture.slot)) as Record<string, unknown>;
+    const revisionTwo = { ...base, revision: 2, updatedAt: fixture.slot.updatedAt + 1 };
+    const canonical = JSON.stringify(revisionTwo);
+    assert.equal(controlStateInternals.parseSlot(canonical).revision, 2);
+    for (const invalid of [
+      { ...revisionTwo, revision: 0 },
+      { ...revisionTwo, revision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...revisionTwo, updatedAt: fixture.slot.createdAt - 1 },
+    ]) assert.throws(() => controlStateInternals.parseSlot(JSON.stringify(invalid)), LocalStateFailure);
+  } finally { await fixture.close(); }
+});
+
+await test("replacement continuously reserves both old and fresh ports through CAS", async () => {
+  const fixture = await temporary(); let state!: LocalRuntimeState, slot!: AndroidRuntimeSlot, checked = false;
+  const unavailable = async (port: number): Promise<boolean> => {
+    const server = createServer();
+    try {
+      await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen({ host: "127.0.0.1", port, exclusive: true }, resolve); });
+      return false;
+    } catch (cause) { return (cause as NodeJS.ErrnoException).code === "EADDRINUSE"; }
+    finally { if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve())); }
+  };
+  try {
+    state = new LocalRuntimeState(fixture.root, { async stage(stage) {
+      if (stage !== "replacement-cas") return;
+      const candidateName = (await readdir(state.devices)).find((name) => name.endsWith(".tmp"));
+      assert.ok(candidateName);
+      const candidate = controlStateInternals.parseSlot(await readFile(join(state.devices, candidateName!), "utf8"));
+      assert.equal(await unavailable(slot.control.port), true);
+      assert.equal(await unavailable(candidate.control.port), true);
+      assert.notEqual(candidate.control.port, slot.control.port);
+      checked = true;
+    } });
+    slot = (await state.initialize(BINDING, 1_800_000_000_000)).slot;
+    const replaced = await state.replaceSlot(slot, undefined, BINDING, slot.deviceRef, 1_800_000_000_001);
+    assert.equal(checked, true);
+    assert.equal(replaced.slot.revision, 2);
+  } finally { await fixture.close(); }
+});
+
+await test("replacement compare-deletes only a strict valid exact generation", async () => {
+  const fixture = await initialized();
+  try {
+    const record = generation(fixture.slot), path = fixture.state.generationPath(fixture.slot.deviceRef);
+    await fixture.state.publishGeneration(record);
+    await writeFile(path, JSON.stringify({ ...record, generation: randomUUID() }));
+    await assert.rejects(fixture.state.replaceSlot(fixture.slot, record, BINDING, fixture.slot.deviceRef, fixture.slot.createdAt + 1), LocalStateFailure);
+    assert.equal((await fixture.state.readSlot())!.revision, 1);
+    assert.ok(await readFile(path, "utf8"));
+  } finally { await fixture.close(); }
+});
+
+await test("replacement CAS rejects stale slot bytes and cannot delete a later generation", async () => {
+  const fixture = await initialized();
+  try {
+    const first = await fixture.state.replaceSlot(fixture.slot, undefined, BINDING, fixture.slot.deviceRef, fixture.slot.createdAt + 1);
+    const later = generation(first.slot); await fixture.state.publishGeneration(later);
+    await assert.rejects(fixture.state.replaceSlot(fixture.slot, undefined, OTHER, Object.freeze({ ...fixture.slot.deviceRef, opaqueId: randomUUID() }), fixture.slot.createdAt + 2), (cause: unknown) => cause instanceof LocalStateFailure && cause.code === "instance-conflict");
+    assert.deepEqual(await fixture.state.readGeneration(first.slot), later);
+    assert.deepEqual(await fixture.state.readSlot(), first.slot);
+  } finally { await fixture.close(); }
+});
+
+await test("replacement removes only matching stale generation and slot temps after proving the old port free", async () => {
+  const fixture = await initialized();
+  try {
+    for (let index = 0; index < 3; index++) {
+      await writeFile(join(fixture.state.runtime, `.${fixture.slot.deviceRef.opaqueId}.${randomUUID()}.tmp`), "secret", { mode: 0o600 });
+      await writeFile(join(fixture.state.devices, `.android-only.${randomUUID()}.tmp`), "secret", { mode: 0o600 });
+    }
+    const other = join(fixture.state.runtime, `.${randomUUID()}.${randomUUID()}.tmp`); await writeFile(other, "keep", { mode: 0o600 });
+    const replaced = await fixture.state.replaceSlot(fixture.slot, undefined, BINDING, fixture.slot.deviceRef, fixture.slot.createdAt + 1);
+    assert.deepEqual(await readdir(fixture.state.devices), ["android-only.json"]);
+    assert.deepEqual(await readdir(fixture.state.runtime), [other.split("/").at(-1)!]);
+    assert.equal(replaced.slot.revision, 2);
+  } finally { await fixture.close(); }
+});

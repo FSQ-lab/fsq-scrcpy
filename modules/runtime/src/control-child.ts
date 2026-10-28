@@ -13,6 +13,7 @@ interface ParentFrame { readonly type: "cancel" | "ready" }
 const send = (value: Readonly<Record<string, string>>): void => { if (process.connected) process.send?.(value); };
 const finishProcess = (code: number): void => { if (process.connected) process.disconnect(); process.exitCode = code; };
 async function manifest() { const root = join(dirname(fileURLToPath(import.meta.url)), "../../../modules/viewer/dist"), specs = [{ role: "entry-module" as const, name: "entry.js", mime: "text/javascript; charset=utf-8" as const }, { role: "worker-module" as const, name: "worker.js", mime: "text/javascript; charset=utf-8" as const }, { role: "style" as const, name: "style.css", mime: "text/css; charset=utf-8" as const }], inputs = []; for (const spec of specs) { const bytes = await readFile(join(root, spec.name)); inputs.push({ ...spec, sha256: createHash("sha256").update(bytes).digest("hex"), bytes }); } return createViewerAssetManifest(inputs); }
+const sameSlot = (left: Awaited<ReturnType<LocalRuntimeState["readSlot"]>>, right: NonNullable<Awaited<ReturnType<LocalRuntimeState["readSlot"]>>>): boolean => !!left && left.revision === right.revision && JSON.stringify(left.deviceRef) === JSON.stringify(right.deviceRef) && left.control.port === right.control.port && left.control.credential === right.control.credential;
 async function main(): Promise<void> {
   let deviceRef: DeviceRef; try { if (process.argv.length !== 3) throw 0; deviceRef = validateDeviceRef(JSON.parse(process.argv[2]!)); if (deviceRef.platform !== "android") throw 0; } catch { finishProcess(1); return; }
   const state = new LocalRuntimeState(); await state.prepare(); const slot = await state.readSlot(); if (!slot || JSON.stringify(slot.deviceRef) !== JSON.stringify(deviceRef)) { finishProcess(1); return; }
@@ -24,10 +25,11 @@ async function main(): Promise<void> {
   try {
     host = new RuntimeControlHost({ slot, generation: record, onShutdown: async () => { await state.deleteGeneration(record,true); await host?.close(); setImmediate(() => process.exit(0)); } });
     try { await host.start();controlBound=true; } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "EADDRINUSE") { send({ type: "contended" }); await cleanup(); finishProcess(0); return; } throw cause; }
+    if (!sameSlot(await state.readSlot(), slot)) { send({ type: "contended" }); await cleanup(); finishProcess(0); return; }
     if (cancelled || !process.connected) { await cleanup(); return; }
     const source = new ScrcpyV501CaptureAdapter({ adbPath: slot.binding.adbPath, cacheRoot: slot.binding.cacheRoot, deviceRegistry: [{ opaqueId: slot.deviceRef.opaqueId, serial: slot.binding.serial }], artifactSource: slot.binding.artifactSource });
     service = createRuntimeService({ mediaProfile: "h264-annexb", manifest: await manifest(), captureSource: source }); host.activate(service);
-    if (cancelled || !process.connected) { await cleanup(); return; } await service.start(); if (cancelled || !process.connected) { await cleanup(); return; } await state.publishGeneration(record); if (cancelled || !process.connected) { await cleanup(); return; }
+    if (cancelled || !process.connected) { await cleanup(); return; } await service.start(); if (cancelled || !process.connected || !sameSlot(await state.readSlot(), slot)) { await cleanup(); return; } await state.publishGeneration(record); if (cancelled || !process.connected || !sameSlot(await state.readSlot(), slot)) { await cleanup(); return; }
     host.ready(); published = true; send({ type: "ready", instanceId, generation });
   } catch { await cleanup(); finishProcess(1); }
 }

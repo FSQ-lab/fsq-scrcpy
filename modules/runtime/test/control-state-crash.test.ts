@@ -70,3 +70,29 @@ await test("actual link faults recover EEXIST ENOENT EXDEV EPERM EOPNOTSUPP and 
     } finally { await rm(value.parent, { recursive: true, force: true }); }
   }
 });
+
+await test("actual process crashes reconcile every replacement write sync close CAS and rename stage", async () => {
+  const points = [
+    "replacement-generation-delete",
+    "replacement-temp-write",
+    "replacement-file-sync",
+    "replacement-file-close",
+    "replacement-cas",
+    "replacement-rename",
+    "replacement-directory-sync",
+  ];
+  for (const point of points) {
+    const value = await root();
+    try {
+      assert.equal(await child(value.path, point), 91);
+      const state = new LocalRuntimeState(value.path);
+      assert.equal(await state.openExisting(), true);
+      const visible = (await state.readSlot())!;
+      assert.equal(visible.revision, point === "replacement-rename" || point === "replacement-directory-sync" ? 2 : 1);
+      const next = await state.replaceSlot(visible, undefined, binding, visible.deviceRef, 1_800_000_000_003);
+      assert.equal(next.slot.revision, visible.revision + 1);
+      assert.equal(await state.readGeneration(next.slot), undefined);
+      assert.deepEqual(await readdir(state.devices), ["android-only.json"]);
+    } finally { await rm(value.parent, { recursive: true, force: true }); }
+  }
+});
