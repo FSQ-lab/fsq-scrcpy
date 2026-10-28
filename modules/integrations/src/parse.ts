@@ -3,6 +3,8 @@ import { parseArgs } from "node:util";
 export type CliCommand =
   | Readonly<{ path: "viewer ensure"; json: boolean; platform?: "android"; deviceRef?: string }>
   | Readonly<{ path: "stream inspect"; json: boolean; streamId: string; afterRevision?: number }>
+  | Readonly<{ path: "stream wait"; json: true; streamId: string; afterRevision: number; waitMs: number }>
+  | Readonly<{ path: "stream watch"; jsonSeq: true; streamId: string; afterRevision?: number }>
   | Readonly<{ path: "stream stop"; json: boolean; streamId: string; expectedRevision?: number }>
   | Readonly<{ path: "viewer approve"; json: boolean; streamId: string; code: string }>
   | Readonly<{ path: "runtime shutdown"; json: boolean; deviceRef: string }>
@@ -14,12 +16,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const REVISION = /^[1-9][0-9]*$/;
 const CODE = /^[0-9A-HJKMNP-TV-Z]{8}$/;
 const PATHS = new Set([
-  "viewer ensure", "stream inspect", "stream stop", "viewer approve",
+  "viewer ensure", "stream inspect", "stream wait", "stream watch", "stream stop", "viewer approve",
   "runtime shutdown", "local-state status", "local-state reset-control", "local-state rebind-device",
 ]);
 const OPTIONS = {
   "viewer ensure": { platform: { type: "string" }, "device-ref": { type: "string" }, json: { type: "boolean" } },
   "stream inspect": { "stream-id": { type: "string" }, "after-revision": { type: "string" }, json: { type: "boolean" } },
+  "stream wait": { "stream-id": { type: "string" }, "after-revision": { type: "string" }, "wait-ms": { type: "string" }, json: { type: "boolean" }, "json-seq": { type: "boolean" } },
+  "stream watch": { "stream-id": { type: "string" }, "after-revision": { type: "string" }, json: { type: "boolean" }, "json-seq": { type: "boolean" } },
   "stream stop": { "stream-id": { type: "string" }, "expected-revision": { type: "string" }, json: { type: "boolean" } },
   "viewer approve": { "stream-id": { type: "string" }, code: { type: "string" }, json: { type: "boolean" } },
   "runtime shutdown": { "device-ref": { type: "string" }, json: { type: "boolean" } },
@@ -36,8 +40,13 @@ const revision = (value: unknown): number | undefined => {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) ? parsed : undefined;
 };
+const waitMs = (value: unknown): number | undefined => {
+  if (typeof value !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(value)) return;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed <= 30_000 ? parsed : undefined;
+};
 
-export function compactSyntax(argv: readonly string[]): boolean { return argv.includes("--json"); }
+export function syntaxMode(argv: readonly string[]): "sequence" | "compact" | "pretty" { return argv.includes("--json-seq") ? "sequence" : argv.includes("--json") ? "compact" : "pretty"; }
 
 export function parseCommand(argv: readonly string[]): CliCommand | undefined {
   if (argv.length < 2) return;
@@ -53,9 +62,16 @@ export function parseCommand(argv: readonly string[]): CliCommand | undefined {
     for (const token of parsed.tokens) {
       if (token.kind !== "option" || seen.has(token.name)) return;
       seen.add(token.name);
-      if (token.name === "json" && token.value !== undefined) return;
+      if ((token.name === "json" || token.name === "json-seq") && token.value !== undefined) return;
     }
     const json = values.json === true;
+    if (path === "stream wait" || path === "stream watch") {
+      const streamId = values["stream-id"], after = revision(values["after-revision"]), jsonSeq = values["json-seq"] === true;
+      if (!uuid(streamId) || values["after-revision"] !== undefined && after === undefined || json === jsonSeq) return;
+      if (path === "stream watch") return jsonSeq ? Object.freeze({ path, jsonSeq, streamId, ...(after === undefined ? {} : { afterRevision: after }) }) : undefined;
+      const rawWait = values["wait-ms"], duration = rawWait === undefined ? 30_000 : waitMs(rawWait);
+      return json && after !== undefined && duration !== undefined ? Object.freeze({ path, json, streamId, afterRevision: after, waitMs: duration }) : undefined;
+    }
     if (path === "viewer ensure") {
       const platform = values.platform, deviceRef = values["device-ref"];
       if (has(values, "platform") === has(values, "device-ref")) return;

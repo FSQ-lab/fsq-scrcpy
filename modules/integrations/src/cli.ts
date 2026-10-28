@@ -11,7 +11,7 @@ import {
   type ControlError,
   type DeviceRef,
   type RuntimeControl,
-  type RuntimeControlSession,
+  RuntimeControlSession,
   type StreamSnapshot,
 } from "../../contracts/src/index.js";
 import { acquireRuntime } from "../../runtime/src/index.js";
@@ -23,7 +23,8 @@ import {
   type LocalStateStatusValue,
   type RuntimeOwnerLocal,
 } from "../../runtime/src/owner.js";
-import { compactSyntax, parseCommand, type CliCommand } from "./parse.js";
+import { syntaxMode, parseCommand, type CliCommand } from "./parse.js";
+import { OutputWriter, type RecordStream } from "./output.js";
 
 export type CliError = Readonly<{
   code: "invalid-cli-syntax" | "confirmation-required";
@@ -36,7 +37,7 @@ type Result = Readonly<{ ok: true; value: unknown }> | Failure | Readonly<{ ok: 
 
 export interface CliIo {
   readonly stdin: Readonly<{ isTTY?: boolean }>;
-  readonly stdout: Readonly<{ write(value: string): unknown }>;
+  readonly stdout: Readonly<{ destroyed?: boolean; writableEnded?: boolean; write(value: string | Uint8Array, callback?: (error?: Error | null) => void): unknown; on?(event: string, listener: (...values: unknown[]) => void): unknown; removeListener?(event: string, listener: (...values: unknown[]) => void): unknown }>;
   readonly stderr: Readonly<{ isTTY?: boolean; write(value: string): unknown }>;
   question(prompt: string, signal?: AbortSignal): Promise<string | undefined>;
 }
@@ -79,13 +80,40 @@ function checkedStream(value: unknown, validator: (value: unknown) => unknown, d
   if (snapshot && (snapshot.streamId !== streamId || !sameDevice(snapshot.deviceRef, deviceRef)) || changes?.some((change) => change.streamId !== streamId || !sameDevice(change.deviceRef, deviceRef))) throw new TypeError("Invalid stream result identity");
   return result;
 }
+type RecognizedSession = Readonly<{ session: RuntimeControlSession; close: () => Promise<void> }>;
+function recognizeSession(value: unknown): RecognizedSession | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+  const prototype = Object.getPrototypeOf(value), attachment = Object.getOwnPropertyDescriptor(value, "attachment");
+  if (!attachment?.enumerable || !("value" in attachment)) return;
+  let close: unknown, control: unknown;
+  if (prototype === RuntimeControlSession.prototype) {
+    close = Object.getOwnPropertyDescriptor(RuntimeControlSession.prototype, "close")?.value;
+    try { control = Reflect.get(value, "control", value); } catch { return; }
+  } else if (prototype === Object.prototype || prototype === null) {
+    const closeDescriptor = Object.getOwnPropertyDescriptor(value, "close"), controlDescriptor = Object.getOwnPropertyDescriptor(value, "control");
+    if (!closeDescriptor || !("value" in closeDescriptor) || !controlDescriptor?.enumerable || !("value" in controlDescriptor)) return;
+    close = closeDescriptor.value; control = controlDescriptor.value;
+  } else return;
+  if (typeof close !== "function" || typeof control !== "object" || control === null) return;
+  const session = value as RuntimeControlSession;
+  return freeze({ session, close: async () => { await Reflect.apply(close as () => unknown, session, []); } });
+}
+function rawAcquireSession(value: unknown): RecognizedSession | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return;
+  const ok = Object.getOwnPropertyDescriptor(value, "ok"), session = Object.getOwnPropertyDescriptor(value, "session");
+  return ok?.enumerable && "value" in ok && ok.value === true && session?.enumerable && "value" in session ? recognizeSession(session.value) : undefined;
+}
 function checkedAcquire(value: unknown): Readonly<{ ok: true; session: RuntimeControlSession }> | Readonly<{ ok: false; error: ControlError }> {
-  if (!exact(value, ["ok", (value as { ok?: unknown }).ok === true ? "session" : "error"]) || typeof value.ok !== "boolean") throw new TypeError("Invalid acquire result");
-  if (!value.ok) { const error = validateControlError(value.error); return freeze({ ok: false, error: deepFreeze(error) }); }
-  const session = value.session as RuntimeControlSession;
-  if (typeof session !== "object" || session === null || typeof session.close !== "function" || typeof session.control !== "object") throw new TypeError("Invalid acquire result");
-  validateRuntimeAttachment(session.attachment);
-  return value as Readonly<{ ok: true; session: RuntimeControlSession }>;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("Invalid acquire result");
+  const okDescriptor = Object.getOwnPropertyDescriptor(value, "ok");
+  if (!okDescriptor?.enumerable || !("value" in okDescriptor) || typeof okDescriptor.value !== "boolean") throw new TypeError("Invalid acquire result");
+  const ok = okDescriptor.value, branch = ok ? "session" : "error";
+  if (!exact(value, ["ok", branch])) throw new TypeError("Invalid acquire result");
+  if (!ok) { const error = Object.getOwnPropertyDescriptor(value, "error"); if (!error || !("value" in error)) throw new TypeError("Invalid acquire result"); return freeze({ ok: false, error: deepFreeze(validateControlError(error.value)) }); }
+  const recognized = rawAcquireSession(value), attachment = recognized && Object.getOwnPropertyDescriptor(recognized.session, "attachment");
+  if (!recognized || !attachment || !("value" in attachment)) throw new TypeError("Invalid acquire result");
+  validateRuntimeAttachment(attachment.value);
+  return freeze({ ok: true, session: recognized.session });
 }
 async function withSession(runtime: CliRuntimeDependencies, request: Parameters<typeof acquireRuntime>[0], signal: AbortSignal | undefined, operation: (control: RuntimeControl, session: RuntimeControlSession) => Promise<Result>): Promise<Result> {
   const acquired = checkedAcquire(await runtime.acquireRuntime(request, signal ? { signal } : undefined));
@@ -125,7 +153,7 @@ async function ensureSession(control: RuntimeControl, session: RuntimeControlSes
   return deepFreeze({ ok: true as const, value: { attachment: session.attachment, deviceRef: value.deviceRef, descriptor: value.descriptor, snapshot: value.snapshot } });
 }
 
-async function storedCommand(command: Exclude<CliCommand, { path: "viewer ensure" | "local-state status" | "local-state reset-control" | "local-state rebind-device" }>, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
+async function storedCommand(command: Exclude<CliCommand, { path: "viewer ensure" | "stream wait" | "stream watch" | "local-state status" | "local-state reset-control" | "local-state rebind-device" }>, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
   return withOwner(runtime, async (owner) => {
     const opaqueId = command.path === "runtime shutdown" ? command.deviceRef : undefined;
     const found = await lookup(owner, opaqueId, signal);
@@ -138,6 +166,56 @@ async function storedCommand(command: Exclude<CliCommand, { path: "viewer ensure
       ? checkedStream(await control.inspect({ streamId: command.streamId, ...(command.afterRevision === undefined ? {} : { afterRevision: command.afterRevision }) }, options), validateInspectControlValue, deviceRef, command.streamId)
       : checkedStream(await control.stopStream({ streamId: command.streamId, ...(command.expectedRevision === undefined ? {} : { expectedRevision: command.expectedRevision }) }, options), validateStopStreamValue, deviceRef, command.streamId, true));
   });
+}
+
+async function observation(command: Extract<CliCommand, { path: "stream wait" | "stream watch" }>, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<number> {
+  const controller = new AbortController(), forward = (): void => controller.abort();
+  signal?.addEventListener("abort", forward, { once: true }); if (signal?.aborted) forward();
+  const writer = new OutputWriter(io.stdout as unknown as RecordStream, forward); let closeSession: (() => Promise<void>) | undefined;
+  const failureStatus = (): 3 | 5 | undefined => writer.failure?.exitStatus;
+  const emit = async (result: Result): Promise<number> => {
+    const failed = failureStatus();
+    if (failed !== undefined) return failed;
+    try { await writer.write(result, command.path === "stream watch"); }
+    catch { return failureStatus() ?? 5; }
+    return exitStatus(result);
+  };
+  try {
+    const failed = failureStatus();
+    if (failed !== undefined) return failed;
+    const found = await withOwner(runtime, (owner) => lookup(owner, undefined, controller.signal));
+    if (!found.ok) return await emit(found);
+    const rawAcquire = await runtime.acquireRuntime({ mode: "attach-only", selector: { kind: "known", deviceRef: found.value.deviceRef } }, { signal: controller.signal });
+    closeSession = rawAcquireSession(rawAcquire)?.close;
+    const acquired = checkedAcquire(rawAcquire);
+    if (!acquired.ok) return await emit(acquired);
+    const active = acquired.session;
+    if (!sameDevice(active.attachment.instance.deviceRef, found.value.deviceRef)) throw new TypeError("Invalid acquired identity");
+    if (command.path === "stream wait") {
+      const result = checkedStream(await active.control.wait({ streamId: command.streamId, afterRevision: command.afterRevision, waitMs: command.waitMs }, { signal: controller.signal }), validateInspectControlValue, found.value.deviceRef, command.streamId);
+      return await emit(result);
+    }
+    let cursor = command.afterRevision;
+    for (;;) {
+      const failed = failureStatus();
+      if (failed !== undefined) return failed;
+      const raw = cursor === undefined
+        ? await active.control.inspect({ streamId: command.streamId }, { signal: controller.signal })
+        : await active.control.wait({ streamId: command.streamId, afterRevision: cursor, waitMs: 30_000 }, { signal: controller.signal });
+      const result = checkedStream(raw, validateInspectControlValue, found.value.deviceRef, command.streamId), status = await emit(result);
+      if (status !== exitStatus(result)) return status;
+      if (!result.ok) return status;
+      const snapshot = (result.value as { snapshot: StreamSnapshot }).snapshot;
+      cursor = snapshot.revision;
+      if (snapshot.phase === "stopped" || snapshot.phase === "device-disconnected" || snapshot.phase === "failed") return 0;
+    }
+  } catch {
+    return failureStatus() ?? await emit(unexpected());
+  } finally {
+    signal?.removeEventListener("abort", forward);
+    await closeSession?.().catch(() => undefined);
+    writer.dispose();
+  }
 }
 
 function maintenanceValue(status: Extract<LocalStateStatusValue, { state: "ready" }>, value: DeviceRef, revision: number, applied: boolean): Result {
@@ -172,7 +250,7 @@ async function maintenance(command: Extract<CliCommand, { path: "local-state res
   });
 }
 
-async function dispatch(command: CliCommand, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
+async function dispatch(command: Exclude<CliCommand, { path: "stream wait" | "stream watch" }>, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
   if (command.path === "viewer ensure") return ensure(command, runtime, signal);
   if (command.path === "local-state status") return withOwner(runtime, async (owner) => validateLocalStateStatusResult(await owner.inspectLocalState({ platform: "android" }, signal ? { signal } : undefined)));
   if (command.path === "local-state reset-control" || command.path === "local-state rebind-device") return maintenance(command, io, runtime, signal);
@@ -186,11 +264,12 @@ function exitStatus(result: Result): number {
 function render(result: Result, compact: boolean): string { return `${JSON.stringify(result, undefined, compact ? undefined : 2)}\n`; }
 
 export async function executeCli(argv: readonly string[], io: CliIo, runtime: CliRuntimeDependencies = DEFAULT_RUNTIME, signal?: AbortSignal): Promise<number> {
-  const compactFailure = compactSyntax(argv), command = parseCommand(argv);
-  if (!command) { const result = syntax(); io.stdout.write(render(result, compactFailure)); return 2; }
+  const mode = syntaxMode(argv), command = parseCommand(argv);
+  if (!command) { const result = syntax(); io.stdout.write(mode === "sequence" ? `\u001e${JSON.stringify(result)}\n` : render(result, mode === "compact")); return 2; }
   if ((command.path === "local-state reset-control" || command.path === "local-state rebind-device") && !(io.stdin.isTTY && io.stderr.isTTY)) {
     const result = syntax(true); io.stdout.write(render(result, command.json)); return 2;
   }
+  if (command.path === "stream wait" || command.path === "stream watch") return observation(command, io, runtime, signal);
   let result: Result;
   try { result = await dispatch(command, io, runtime, signal); }
   catch { result = unexpected(); }

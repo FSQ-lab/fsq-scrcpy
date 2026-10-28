@@ -57,6 +57,92 @@ async function signalInstalled(bin: string, root: string, signal: "SIGINT" | "SI
   assert.equal(await readFile(marker, "utf8"), "close\n");
 }
 
+async function installWatchFixture(installedRoot: string, log: string): Promise<void> {
+  const runtime = join(installedRoot, ".build", "runtime", "src");
+  await writeFile(join(runtime, "owner.js"), `
+const device = Object.freeze({ contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: "${DEVICE_ID}" });
+const status = Object.freeze({ ok: true, value: Object.freeze({ platform: "android", state: "ready", deviceRef: device, stateRevision: 7, runtime: Object.freeze({ state: "not-running" }) }) });
+export const validateLocalStateStatusResult = value => value;
+export const validateResetControlStateResult = value => value;
+export const validateRebindDeviceResult = value => value;
+export function createRuntimeOwnerLocal() {
+  return Object.freeze({ async inspectLocalState() { return status; }, async close() {}, async [Symbol.asyncDispose]() {} });
+}
+`);
+  await writeFile(join(runtime, "index.js"), `
+import { appendFile, writeFile } from "node:fs/promises";
+const device = Object.freeze({ contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: "${DEVICE_ID}" });
+const stream = "223e4567-e89b-42d3-a456-426614174000";
+const target = Object.freeze({ controlVersion: Object.freeze({ major: 1, minor: 0 }), instanceId: "323e4567-e89b-42d3-a456-426614174000", generation: "423e4567-e89b-42d3-a456-426614174000", contractVersion: 2, deviceRef: device, features: Object.freeze(["wait-v1"]) });
+const snap = (revision, phase = "demand-pending") => Object.freeze({ streamId: stream, deviceRef: device, revision, phase, ...(phase === "stopped" ? { reason: "explicit-stop" } : {}), activeViewerCount: 0, updatedAt: revision });
+const seen = (snapshot, changes = [snapshot], reset = false, timedOut = false) => Object.freeze({ ok: true, value: Object.freeze({ snapshot, changes: Object.freeze(changes), reset, timedOut }) });
+const cancelled = Object.freeze({ ok: false, error: Object.freeze({ controlVersion: Object.freeze({ major: 1, minor: 0 }), code: "request-cancelled", disposition: "recoverable", operationState: "not-applied", safeMessage: "The control request was cancelled before it was applied." }) });
+export async function acquireRuntime() {
+  let calls = 0;
+  const control = Object.freeze({
+    async inspect() { return seen(snap(1), []); },
+    async wait(input, { signal } = {}) {
+      await writeFile(${JSON.stringify(`${log}.pid`)}, String(process.pid));
+      await appendFile(${JSON.stringify(log)}, JSON.stringify(input) + "\\n");
+      if (process.env.FSQ_WATCH_MODE === "cancel") {
+        if (signal?.aborted) return cancelled;
+        return await new Promise(resolve => {
+          const keepAlive = setTimeout(() => resolve(cancelled), 60_000);
+          signal.addEventListener("abort", () => { clearTimeout(keepAlive); resolve(cancelled); }, { once: true });
+        });
+      }
+      if (process.env.FSQ_WATCH_MODE === "sequence") {
+        calls++;
+        if (calls === 1) return seen(snap(input.afterRevision), [], false, true);
+        if (calls === 2) return seen(snap(5), [], true, false);
+        if (calls === 3) return seen(snap(6));
+        return seen(snap(7, "stopped"));
+      }
+      if (process.env.FSQ_WATCH_MODE === "epipe") await new Promise(resolve => setTimeout(resolve, 25));
+      if (process.env.FSQ_WATCH_MODE === "cursor") return seen(snap(input.afterRevision + 1, "stopped"));
+      return seen(snap(input.afterRevision + 1));
+    },
+    async close() { await appendFile(${JSON.stringify(log)}, "close\\n"); },
+  });
+  return Object.freeze({ ok: true, session: Object.freeze({ attachment: Object.freeze({ disposition: "attached", instance: target }), control, async close() { await control.close(); } }) });
+}
+`);
+}
+const sequenceRecords = (value: string): readonly Record<string, unknown>[] => value.split("\u001e").slice(1).map((record) => JSON.parse(record.slice(0, -1)) as Record<string, unknown>);
+async function installedSignal(bin: string, root: string, log: string, signal: "SIGINT" | "SIGTERM"): Promise<void> {
+  const child = spawn("/bin/sh", ["-c", "exec fsq-scrcpy stream watch --stream-id 223e4567-e89b-42d3-a456-426614174000 --after-revision 1 --json-seq"], { cwd: root, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, FSQ_WATCH_MODE: "cancel" }, stdio: ["ignore", "pipe", "pipe"] });
+  const output: Buffer[] = [], errors: Buffer[] = []; child.stdout.on("data", (chunk: Buffer) => output.push(chunk)); child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { child.once("error", reject); child.once("close", (code, actual) => resolve({ code, signal: actual })); });
+  await until(() => readable(log), (value) => value?.includes("afterRevision") === true);
+  const pid = Number(await readFile(`${log}.pid`, "utf8"));
+  process.kill(pid, signal);
+  const closedResult = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { const timer = setTimeout(() => reject(new Error(`installed watch ${signal} did not settle`)), 5_000); void closed.then((value) => { clearTimeout(timer); resolve(value); }, reject); });
+  assert.deepEqual(closedResult, { code: 3, signal: null }, `${signal} log=${JSON.stringify(await readable(log))} stdout=${JSON.stringify(Buffer.concat(output).toString("utf8"))} stderr=${JSON.stringify(Buffer.concat(errors).toString("utf8"))}`);
+  const records = sequenceRecords(Buffer.concat(output).toString("utf8"));
+  assert.equal(records.length, 1);
+  assert.equal((records[0]!.error as Record<string, unknown>).code, "request-cancelled");
+  assert.equal(Buffer.concat(errors).toString("utf8"), "");
+}
+async function installedForce(bin: string, root: string, log: string, first: "SIGINT" | "SIGTERM", second: "SIGINT" | "SIGTERM"): Promise<void> {
+  const preload = join(root, `blocked-${first}-${second}.mjs`), blocked = join(root, `blocked-${first}-${second}.marker`);
+  await writeFile(preload, `import { appendFileSync } from "node:fs";\nsetInterval(()=>{},60_000);\nprocess.stdout.write=()=>{appendFileSync(${JSON.stringify(blocked)},"write\\n");return false;};\n`);
+  await writeFile(log, "");
+  const entry = join(root, "prefix", "node_modules", "fsq-scrcpy", ".build", "integrations", "src", "bin.js");
+  const child = spawn(process.execPath, [entry, "stream", "watch", "--stream-id", "223e4567-e89b-42d3-a456-426614174000", "--after-revision", "1", "--json-seq"], { cwd: root, env: { ...process.env, PATH: `${bin}${delimiter}${process.env.PATH ?? ""}`, NODE_OPTIONS: `--import=${preload}`, FSQ_WATCH_MODE: "blocked" }, stdio: ["ignore", "pipe", "pipe"] });
+  const output: Buffer[] = [], errors: Buffer[] = [];
+  child.stdout.on("data", (chunk: Buffer) => output.push(chunk)); child.stderr.on("data", (chunk: Buffer) => errors.push(chunk));
+  const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { child.once("error", reject); child.once("close", (code, actual) => resolve({ code, signal: actual })); });
+  await until(() => readable(blocked), (value) => value === "write\n");
+  const pid = Number(await readFile(`${log}.pid`, "utf8"));
+  process.kill(pid, first);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  process.kill(pid, second);
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => { const timer = setTimeout(() => reject(new Error("second signal did not force termination")), 5_000); void closed.then((value) => { clearTimeout(timer); resolve(value); }, reject); });
+  assert.deepEqual(result, { code: null, signal: second });
+  assert.equal(Buffer.concat(output).length, 0);
+  assert.equal(Buffer.concat(errors).toString("utf8"), "");
+}
+
 await test("packed private package installs a shebang executable invoked through PATH", async (context) => {
   const project = process.cwd(), root = await mkdtemp(join(tmpdir(), "fsq-cli-pack-"));
   context.after(() => rm(root, { recursive: true, force: true }));
@@ -68,6 +154,7 @@ await test("packed private package installs a shebang executable invoked through
   for (const required of [
     ".build/integrations/src/bin.js",
     ".build/integrations/src/cli.js",
+    ".build/integrations/src/output.js",
     ".build/runtime/src/owner.js",
     ".build/runtime/src/control-child.js",
     ".build/contracts/src/index.js",
@@ -97,6 +184,36 @@ await test("packed private package installs a shebang executable invoked through
   assert.equal(invoked.stdout.includes("\n  \""), false);
   assert.equal(invoked.stdout.includes("PRIVATE_CANARY"), false);
   assert.equal(invoked.stdout.includes("/Users/private"), false);
+
+  const watchLog = join(root, "watch.log"); await installWatchFixture(packageRoot, watchLog);
+  for (const cursor of [7, 8]) {
+    await writeFile(watchLog, "");
+    const watched = await run("fsq-scrcpy", ["stream", "watch", "--stream-id", "223e4567-e89b-42d3-a456-426614174000", "--after-revision", String(cursor), "--json-seq"], { cwd: root, env: { ...env, FSQ_WATCH_MODE: "cursor" } });
+    assert.equal(watched.code, 0); assert.equal(watched.stderr, ""); const records = sequenceRecords(watched.stdout); assert.equal(records.length, 1); assert.equal(((records[0]!.value as { snapshot: { revision: number } }).snapshot.revision), cursor + 1);
+    assert.equal((await readFile(watchLog, "utf8")).includes(`"afterRevision":${cursor}`), true);
+  }
+  await writeFile(watchLog, "");
+  const sequence = await run("fsq-scrcpy", ["stream", "watch", "--stream-id", "223e4567-e89b-42d3-a456-426614174000", "--after-revision", "1", "--json-seq"], { cwd: root, env: { ...env, FSQ_WATCH_MODE: "sequence" } });
+  assert.equal(sequence.code, 0);
+  assert.equal(sequence.stderr, "");
+  const sequenceValues = sequenceRecords(sequence.stdout).map((record) => record.value as { snapshot: { revision: number }; reset: boolean; timedOut: boolean });
+  assert.deepEqual(sequenceValues.map((value) => [value.snapshot.revision, value.reset, value.timedOut]), [[1, false, true], [5, true, false], [6, false, false], [7, false, false]]);
+  assert.equal(`${sequence.stdout}${sequence.stderr}`.includes("/Users/private"), false);
+
+  await writeFile(watchLog, "");
+  const waited = await run("fsq-scrcpy", ["stream", "wait", "--stream-id", "223e4567-e89b-42d3-a456-426614174000", "--after-revision", "7", "--json"], { cwd: root, env: { ...env, FSQ_WATCH_MODE: "cursor" } });
+  assert.equal(waited.code, 0);
+  assert.equal(waited.stderr, "");
+  assert.equal(((JSON.parse(waited.stdout) as { value: { snapshot: { revision: number } } }).value.snapshot.revision), 8);
+  assert.equal((await readFile(watchLog, "utf8")).includes('"waitMs":30000'), true);
+  await writeFile(watchLog, ""); await installedSignal(bin, root, watchLog, "SIGINT"); await writeFile(watchLog, ""); await installedSignal(bin, root, watchLog, "SIGTERM");
+  for (const [first, second] of [["SIGINT", "SIGINT"], ["SIGTERM", "SIGTERM"], ["SIGINT", "SIGTERM"], ["SIGTERM", "SIGINT"]] as const) await installedForce(bin, root, watchLog, first, second);
+
+  await writeFile(watchLog, "");
+  const epipe = spawn("fsq-scrcpy", ["stream", "watch", "--stream-id", "223e4567-e89b-42d3-a456-426614174000", "--after-revision", "1", "--json-seq"], { cwd: root, env: { ...env, FSQ_WATCH_MODE: "epipe" }, stdio: ["ignore", "pipe", "pipe"] });
+  let firstRecord = Buffer.alloc(0); const diagnostics: Buffer[] = []; epipe.stderr.on("data", (chunk: Buffer) => diagnostics.push(chunk)); epipe.stdout.on("data", (chunk: Buffer) => { firstRecord = Buffer.concat([firstRecord, chunk]); if (firstRecord.includes(0x0a)) epipe.stdout.destroy(); });
+  const epipeClosed = new Promise<number | null>((resolve, reject) => { epipe.once("error", reject); epipe.once("close", resolve); });
+  assert.equal(await boundedClose(epipeClosed, "installed watch did not classify EPIPE"), 3); assert.equal(sequenceRecords(firstRecord.subarray(0, firstRecord.indexOf(0x0a) + 1).toString("utf8")).length, 1); assert.equal(Buffer.concat(diagnostics).toString("utf8"), "");
   await signalInstalled(bin, root, "SIGINT");
   await signalInstalled(bin, root, "SIGTERM");
 });

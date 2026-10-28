@@ -134,10 +134,18 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 
 ## macOS Android RuntimeControl Bounded Wait
 
-本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` SPEC delta；它只替换上文“wait不支持”的部分，不启用CLI wait/watch。
+本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` provider契约；下方`ANDROID-CLI-WATCH-MACOS-04B`只新增CLI映射，不改变Runtime wait。
 
 - 平台组合仍为本地macOS arm64、恰好一台USB Android及一个persistent Runtime/stream；新增provider-neutral bounded long-poll `wait`，调用方按revision恢复，不保存server-side cursor或per-client history。
-- Feature成功后ordinary client支持`wait`；`fsq-scrcpy stream wait/watch`仍属于后续`ANDROID-CLI-WATCH-MACOS-04B`。Capture/Viewer no-delta；Integrations不新增命令、解析或wait/watch行为，但既有viewer ensure/stream inspect必须透传新的Contracts exact值。
+- ordinary client支持`wait`；下方`fsq-scrcpy stream wait/watch`只消费该seam。Capture/Viewer no-delta；既有viewer ensure/stream inspect继续透传Contracts exact值。
 - Contracts clean cutover把`RuntimeInstance.features`固定为`["wait-v1"]`，扩展同一个observation value并新增第七条client-authority route；不升ControlVersion、不新增error/dependency/媒体或支持矩阵声明。
 - Runtime用既有StateStore mutex/history/monotonic Clock实现原子注册、change/terminal/timeout/cancel线性化；最多8 authenticated connections/in-flight、4 concurrent waits、每local client及socket一个wait，所有完成路径恰好一次释放listener/timer/admission。
-- Exact值、canonical bytes、caps、deadline、close/cancel与验收由Contracts/Runtime同名delta定义；通过temporary control client证明provider，不新增CLI命令。
+- Exact provider值、canonical bytes、caps、deadline、close/cancel与验收由Contracts/Runtime同名delta定义；CLI framing/lifecycle由下方Integrations契约定义。
+
+## macOS Android CLI Wait/Watch
+
+本节定义用户已确认的 `ANDROID-CLI-WATCH-MACOS-04B` SPEC delta；它只新增CLI wait/watch，不改变Runtime provider契约。
+
+- 平台组合仍为本地macOS arm64、USB Android、accepted `wait-v1` Runtime。Integrations新增attach-only one-shot `stream wait`与resumable `stream watch`；不auto/spawn/ensure/stop或修改设备、stream、Runtime及owner state。
+- one-shot输出一个exact compact JSON result；watch按RFC7464输出完整provider result records并只在完整record后推进invocation-local cursor。无persistent/server cursor、自动重连、retry/history queue、daemon或subscription。
+- Contracts/Runtime/Capture/Viewer、依赖、package/lock、媒体与支持矩阵no-delta；Root只激活CLI surface。Exact grammar/framing/backpressure/signal/EPIPE/exit/privacy及真实验收由Integrations同名delta定义。

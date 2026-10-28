@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   CONTROL_VERSION,
@@ -27,29 +28,34 @@ const STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ platfor
 const LIVE_STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ ...STATUS.value, runtime: Object.freeze({ state: "live" as const, target: Object.freeze({ instanceId: INSTANCE, generation: GENERATION }) }) }) });
 const UNINITIALIZED = Object.freeze({ ok: true as const, value: Object.freeze({ platform: "android" as const, state: "uninitialized" as const }) });
 const DESCRIPTOR = Object.freeze({ contractVersion: 2 as const, streamId: STREAM, standaloneUri: `http://127.0.0.1:49152/viewer/${STREAM}`, presentationModes: Object.freeze(["standalone"] as const), expiresAt: 60 });
+const snapshot = (revision: number, phase: StreamSnapshot["phase"] = "demand-pending"): StreamSnapshot => Object.freeze({ ...SNAPSHOT, revision, phase, updatedAt: revision, ...(phase === "stopped" ? { reason: "explicit-stop" as const } : {}) });
+const observed = (value: StreamSnapshot, options: { timedOut?: boolean; reset?: boolean } = {}): unknown => ({ ok: true, value: { snapshot: value, changes: options.timedOut || options.reset ? [] : [value], reset: options.reset ?? false, timedOut: options.timedOut ?? false } });
 
-type Calls = { acquire: unknown[]; owner: string[]; control: string[]; closed: string[]; prompts: string[] };
-interface Fixture { runtime: CliRuntimeDependencies; calls: Calls; setStatus(value: unknown): void; setControl(name: "ensure" | "inspect" | "stop", value: unknown): void; setOwner(name: "approve" | "shutdown" | "reset" | "rebind", value: unknown): void; throwAcquire(cause: unknown): void }
+type Calls = { acquire: unknown[]; owner: string[]; control: string[]; closed: string[]; prompts: string[]; aborts: number };
+interface Fixture { runtime: CliRuntimeDependencies; calls: Calls; setStatus(value: unknown): void; setAcquire(value: unknown): void; setControl(name: "ensure" | "inspect" | "wait" | "stop", value: unknown): void; setOwner(name: "approve" | "shutdown" | "reset" | "rebind", value: unknown): void; throwAcquire(cause: unknown): void }
 function fixture(): Fixture {
-  const calls: Calls = { acquire: [], owner: [], control: [], closed: [], prompts: [] };
-  let status: unknown = STATUS, acquireCause: unknown;
+  const calls: Calls = { acquire: [], owner: [], control: [], closed: [], prompts: [], aborts: 0 };
+  let status: unknown = STATUS, acquireCause: unknown, acquireValue: unknown;
   const values: Record<string, unknown> = {
     ensure: { ok: true, value: { deviceRef: DEVICE, descriptor: DESCRIPTOR, snapshot: SNAPSHOT } },
     inspect: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false } },
+    wait: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: true } },
     stop: { ok: true, value: { snapshot: SNAPSHOT } },
     approve: { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 2 } },
     shutdown: { ok: true, value: { instanceId: INSTANCE, generation: GENERATION } },
     reset: { ok: true, value: { platform: "android", deviceRef: DEVICE, previousStateRevision: 7, stateRevision: 8 } },
     rebind: { ok: true, value: { platform: "android", previousDeviceRef: DEVICE, deviceRef: NEXT_DEVICE, previousStateRevision: 7, stateRevision: 8 } },
   };
+  const take = (name: string): unknown => Array.isArray(values[name]) ? (values[name] as unknown[]).shift() : values[name];
   const control: RuntimeControl = {
-    async ensureViewer(options) { calls.control.push(`ensure:${Boolean(options?.signal)}`); return values.ensure as never; },
-    async inspect(input, options) { calls.control.push(`inspect:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.inspect as never; },
-    async wait() { throw new Error("CLI must not call wait"); },
-    async stopStream(input, options) { calls.control.push(`stop:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.stop as never; },
+    async ensureViewer(options) { calls.control.push(`ensure:${Boolean(options?.signal)}`); return take("ensure") as never; },
+    async inspect(input, options) { calls.control.push(`inspect:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return take("inspect") as never; },
+    async wait(input, options) { calls.control.push(`wait:${JSON.stringify(input)}:${Boolean(options?.signal)}:${Boolean(options?.signal?.aborted)}`); if (options?.signal?.aborted) calls.aborts++; else options?.signal?.addEventListener("abort", () => { calls.aborts++; }, { once: true }); return take("wait") as never; },
+    async stopStream(input, options) { calls.control.push(`stop:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return take("stop") as never; },
     async close() { calls.closed.push("control"); },
   };
   const session = { attachment: ATTACHMENT, control, async close() { calls.closed.push("session"); } } as unknown as RuntimeControlSession;
+  acquireValue = { ok: true, session };
   const owner: RuntimeOwnerLocal = {
     async inspectLocalState(_input, options) { calls.owner.push(`status:${Boolean(options?.signal)}`); return status as never; },
     async approveViewerPairing(input, options) { calls.owner.push(`approve:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.approve as never; },
@@ -60,29 +66,37 @@ function fixture(): Fixture {
     async [Symbol.asyncDispose]() { await this.close(); },
   };
   let runtime: CliRuntimeDependencies = {
-    acquireRuntime: (async (request, options) => { calls.acquire.push({ request, signal: Boolean(options?.signal) }); if (acquireCause) throw acquireCause; return { ok: true, session }; }) as CliRuntimeDependencies["acquireRuntime"],
+    acquireRuntime: (async (request, options) => { calls.acquire.push({ request, signal: Boolean(options?.signal) }); if (acquireCause) throw acquireCause; return acquireValue as never; }) as CliRuntimeDependencies["acquireRuntime"],
     createRuntimeOwnerLocal: () => owner,
   };
   return {
     get runtime() { return runtime; }, calls,
     setStatus(value) { status = value; },
+    setAcquire(value) { acquireValue = value; },
     setControl(name, value) { values[name] = value; },
     setOwner(name, value) { values[name] = value; },
     throwAcquire(cause) { acquireCause = cause; runtime = { ...runtime }; },
   };
 }
-interface Invocation { code: number; stdout: string; stderr: string; value: Record<string, unknown>; calls: Calls }
-async function invoke(args: readonly string[], options: { tty?: boolean; answers?: readonly (string | undefined)[]; fixture?: Fixture; signal?: AbortSignal } = {}): Promise<Invocation> {
-  const value = options.fixture ?? fixture(), output: string[] = [], errors: string[] = [], answers = [...(options.answers ?? [])];
+interface Invocation { code: number; stdout: string; stderr: string; value: Record<string, unknown>; records: readonly Record<string, unknown>[]; calls: Calls; outputListeners: number }
+async function invoke(args: readonly string[], options: { tty?: boolean; answers?: readonly (string | undefined)[]; fixture?: Fixture; signal?: AbortSignal; onWrite?(count: number): void; outputFailure?: "EPIPE" | "EIO" | "close" } = {}): Promise<Invocation> {
+  const value = options.fixture ?? fixture(), output: string[] = [], errors: string[] = [], answers = [...(options.answers ?? [])], events = new EventEmitter();
   const io: CliIo = {
     stdin: { isTTY: options.tty ?? false },
-    stdout: { write(chunk) { output.push(chunk); } },
+    stdout: Object.assign(events, { write(chunk: string | Uint8Array, callback?: (error?: Error | null) => void) {
+      output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      if (options.outputFailure === "close") events.emit("close");
+      else callback?.(options.outputFailure ? Object.assign(new Error("private output cause"), { code: options.outputFailure }) : undefined);
+      options.onWrite?.(output.length);
+      return true;
+    } }),
     stderr: { isTTY: options.tty ?? false, write(chunk) { errors.push(chunk); } },
     async question(prompt) { value.calls.prompts.push(prompt); errors.push(prompt); return answers.shift(); },
   };
-  const code = await executeCli(args, io, value.runtime, options.signal);
-  assert.equal(output.length, 1);
-  return { code, stdout: output[0]!, stderr: errors.join(""), value: JSON.parse(output[0]!) as Record<string, unknown>, calls: value.calls };
+  const code = await executeCli(args, io, value.runtime, options.signal), stdout = output.join("");
+  assert.equal(output.length > 0, true);
+  const records = stdout.startsWith("\u001e") ? stdout.split("\u001e").slice(1).map((record) => JSON.parse(record.slice(0, -1)) as Record<string, unknown>) : [JSON.parse(stdout) as Record<string, unknown>];
+  return { code, stdout, stderr: errors.join(""), value: records[0]!, records, calls: value.calls, outputListeners: events.listenerCount("error") + events.listenerCount("close") + events.listenerCount("drain") };
 }
 
 await test("rejects every malformed grammar before product I/O with deterministic render mode", async () => {
@@ -106,18 +120,27 @@ await test("rejects every malformed grammar before product I/O with deterministi
     ["local-state", "rebind-device", "--platform", "android", "--device-ref", ID, "--force"],
     ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1"],
     ["stream", "watch", "--stream-id", STREAM],
+    ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"],
+    ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--wait-ms", "30001", "--json"],
+    ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--wait-ms", "01", "--json"],
+    ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json", "--json-seq"],
+    ["stream", "watch", "--stream-id", STREAM, "--json"],
+    ["stream", "watch", "--stream-id", STREAM, "--wait-ms", "1", "--json-seq"],
+    ["stream", "watch", "--stream-id", STREAM, "--json-seq", "--json-seq"],
   ];
   for (const args of invalid) {
     const value = fixture(), result = await invoke(args, { fixture: value });
     assert.equal(result.code, 2, args.join(" "));
     assert.deepEqual(result.value, { ok: false, error: { code: "invalid-cli-syntax", disposition: "usage", operationState: "not-applied", safeMessage: "Invalid command syntax." } });
     assert.equal(result.stderr, "");
-    assert.deepEqual(value.calls, { acquire: [], owner: [], control: [], closed: [], prompts: [] });
+    assert.deepEqual(value.calls, { acquire: [], owner: [], control: [], closed: [], prompts: [], aborts: 0 });
   }
   const compact = await invoke(["nonsense", "command", "--json"]);
   assert.equal(compact.stdout.includes("\n  \""), false);
   const malformedEquals = await invoke(["nonsense", "command", "--json=true"]);
   assert.equal(malformedEquals.stdout.includes("\n  \""), true);
+  const sequenced = await invoke(["nonsense", "command", "--json", "--json-seq"]);
+  assert.equal(sequenced.stdout.startsWith("\u001e{"), true); assert.equal(sequenced.stdout.endsWith("}\n"), true); assert.equal(sequenced.stdout.includes("\n  \""), false);
 });
 
 await test("maps auto and known ensure to the only allowed selectors and safe combined result", async () => {
@@ -148,6 +171,137 @@ await test("maps inspect and stop through status plus attach-only without spawni
   assert.deepEqual(stop.calls.owner, ["status:false"]);
 });
 
+
+await test("one-shot wait applies exact defaults, bounds, attach-only ownership, and one provider call", async () => {
+  const value = fixture(), result = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "9", "--json"], { fixture: value });
+  assert.equal(result.code, 0); assert.equal(result.stdout.startsWith("{"), true); assert.equal(result.stdout.endsWith("\n"), true);
+  assert.deepEqual(result.calls.owner, ["status:true"]);
+  assert.deepEqual(result.calls.acquire, [{ request: { mode: "attach-only", selector: { kind: "known", deviceRef: DEVICE } }, signal: true }]);
+  assert.deepEqual(result.calls.control, [`wait:${JSON.stringify({ streamId: STREAM, afterRevision: 9, waitMs: 30_000 })}:true:false`]);
+  assert.deepEqual(result.calls.closed, ["owner", "session"]);
+  const zero = fixture(); await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision=1", "--wait-ms=0", "--json"], { fixture: zero });
+  assert.equal(zero.calls.control[0], `wait:${JSON.stringify({ streamId: STREAM, afterRevision: 1, waitMs: 0 })}:true:false`);
+});
+
+await test("malformed recognizable acquire success closes raw sessions without accessor, prototype, or private leakage", async () => {
+  const value = fixture(); let rawCloses = 0;
+  value.setAcquire({ ok: true, session: { attachment: { ...ATTACHMENT, privateAuthority: "OWNER-PRIVATE" }, control: {}, async close() { rawCloses++; } } });
+  const malformed = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json"], { fixture: value });
+  assert.equal(malformed.code, 5); assert.equal((malformed.value.error as Record<string, unknown>).code, "runtime-exited");
+  assert.equal(rawCloses, 1); assert.deepEqual(malformed.calls.closed, ["owner"]); assert.equal(`${malformed.stdout}${malformed.stderr}`.includes("OWNER-PRIVATE"), false);
+
+  const outerExtra = fixture(); let outerCloses = 0;
+  outerExtra.setAcquire({ ok: true, session: { attachment: ATTACHMENT, control: {}, async close() { outerCloses++; } }, privateAuthority: "OUTER-PRIVATE" });
+  const outerRejected = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json"], { fixture: outerExtra });
+  assert.equal(outerRejected.code, 5); assert.equal(outerCloses, 1); assert.deepEqual(outerRejected.calls.closed, ["owner"]); assert.equal(`${outerRejected.stdout}${outerRejected.stderr}`.includes("OUTER-PRIVATE"), false);
+
+  let getterTouches = 0, inheritedCloses = 0;
+  const accessor = Object.create({ async close() { inheritedCloses++; } }) as Record<string, unknown>;
+  Object.defineProperty(accessor, "attachment", { enumerable: true, get() { getterTouches++; return ATTACHMENT; } });
+  Object.defineProperty(accessor, "control", { enumerable: true, value: {} });
+  const hostile = fixture(); hostile.setAcquire({ ok: true, session: accessor });
+  const rejected = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json"], { fixture: hostile });
+  assert.equal(rejected.code, 5); assert.equal(getterTouches, 0); assert.equal(inheritedCloses, 0); assert.deepEqual(rejected.calls.closed, ["owner"]);
+
+  let outerOkTouches = 0, hiddenCloses = 0;
+  const outerAccessor = { session: { attachment: ATTACHMENT, control: {}, async close() { hiddenCloses++; } } } as Record<string, unknown>;
+  Object.defineProperty(outerAccessor, "ok", { enumerable: true, get() { outerOkTouches++; return true; } });
+  const hostileOuter = fixture(); hostileOuter.setAcquire(outerAccessor);
+  const outerAccessorRejected = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json"], { fixture: hostileOuter });
+  assert.equal(outerAccessorRejected.code, 5); assert.equal(outerOkTouches, 0); assert.equal(hiddenCloses, 0); assert.deepEqual(outerAccessorRejected.calls.closed, ["owner"]);
+});
+
+await test("watch emits exact records and advances its local cursor only after accepted writes", async () => {
+  const value = fixture(), stopping = snapshot(2, "stopping"), stopped = snapshot(3, "stopped");
+  value.setControl("wait", [observed(SNAPSHOT, { timedOut: true }), observed(stopping), observed(stopped)]);
+  const result = await invoke(["stream", "watch", "--stream-id", STREAM, "--json-seq"], { fixture: value });
+  assert.equal(result.code, 0); assert.equal(result.records.length, 4); assert.equal(result.stdout.match(/\u001e/g)?.length, 4);
+  assert.deepEqual(result.records.map((record) => ((record.value as { snapshot: StreamSnapshot }).snapshot.revision)), [1, 1, 2, 3]);
+  assert.deepEqual(result.calls.control, [
+    `inspect:${JSON.stringify({ streamId: STREAM })}:true`,
+    `wait:${JSON.stringify({ streamId: STREAM, afterRevision: 1, waitMs: 30_000 })}:true:false`,
+    `wait:${JSON.stringify({ streamId: STREAM, afterRevision: 1, waitMs: 30_000 })}:true:false`,
+    `wait:${JSON.stringify({ streamId: STREAM, afterRevision: 2, waitMs: 30_000 })}:true:false`,
+  ]);
+  assert.equal(result.calls.control.some((call) => /ensure|stop/.test(call)), false); assert.deepEqual(result.calls.closed, ["owner", "session"]);
+  const resumed = fixture(); resumed.setControl("wait", observed(snapshot(8, "stopped")));
+  const cursor = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "7", "--json-seq"], { fixture: resumed });
+  assert.equal(cursor.records.length, 1); assert.equal(cursor.calls.control.some((call) => call.startsWith("inspect:")), false);
+  assert.equal(cursor.calls.control[0], `wait:${JSON.stringify({ streamId: STREAM, afterRevision: 7, waitMs: 30_000 })}:true:false`);
+});
+
+await test("first signal preserves an accepted record then obtains one exact cancellation record", async () => {
+  const controller = new AbortController(), value = fixture();
+  value.setControl("wait", [observed(snapshot(2)), { ok: false, error: controlError("request-cancelled") }]);
+  const result = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"], { fixture: value, signal: controller.signal, onWrite(count) { if (count === 1) controller.abort(); } });
+  assert.equal(result.code, 3); assert.equal(result.records.length, 2);
+  assert.equal((result.records[1]!.error as Record<string, unknown>).code, "request-cancelled");
+  assert.equal(result.calls.control[1]!.endsWith(":true:true"), true); assert.deepEqual(result.calls.closed, ["owner", "session"]);
+});
+
+await test("watch validates provider identity and extra private fields before RFC output", async () => {
+  for (const malformed of [
+    { ok: true, value: { snapshot: { ...SNAPSHOT, deviceRef: NEXT_DEVICE }, changes: [], reset: false, timedOut: false } },
+    { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false, serial: "SERIAL-PRIVATE" } },
+  ]) {
+    const value = fixture(); value.setControl("wait", malformed);
+    const result = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"], { fixture: value });
+    assert.equal(result.code, 5); assert.equal((result.value.error as Record<string, unknown>).code, "runtime-exited");
+    assert.equal(result.stdout.includes("SERIAL-PRIVATE"), false); assert.equal(result.stderr, ""); assert.deepEqual(result.calls.closed, ["owner", "session"]);
+  }
+});
+
+await test("accepted terminal success and each provider failure win a simultaneous first signal", async () => {
+  const cases: readonly [unknown, number, string | undefined][] = [
+    [observed(snapshot(2, "stopped")), 0, undefined],
+    [{ ok: false, error: controlError("instance-not-found") }, 3, "instance-not-found"],
+    [{ ok: false, error: controlError("instance-conflict") }, 4, "instance-conflict"],
+    [{ ok: false, error: controlError("runtime-exited") }, 5, "runtime-exited"],
+  ];
+  for (const [providerResult, exit, errorCode] of cases) {
+    const controller = new AbortController(), value = fixture(); value.setControl("wait", providerResult);
+    const result = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"], { fixture: value, signal: controller.signal, onWrite() { controller.abort(); } });
+    assert.equal(result.code, exit); assert.equal(result.records.length, 1); assert.equal(result.calls.control.filter((call) => call.startsWith("wait:")).length, 1);
+    if (errorCode) assert.equal((result.value.error as Record<string, unknown>).code, errorCode); else assert.equal(((result.value.value as { snapshot: StreamSnapshot }).snapshot.phase), "stopped");
+    assert.equal(result.calls.aborts, 1); assert.deepEqual(result.calls.closed, ["owner", "session"]); assert.equal(result.outputListeners, 0);
+  }
+});
+
+await test("output cause wins EPIPE, close, and EIO against first signal in both orderings", async () => {
+  for (const outputFailure of ["EPIPE", "close", "EIO"] as const) for (const order of ["signal-first", "output-first"] as const) {
+    const controller = new AbortController(), value = fixture(); value.setControl("wait", observed(snapshot(2, "stopped")));
+    if (order === "signal-first") controller.abort();
+    const result = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"], {
+      fixture: value, signal: controller.signal, outputFailure,
+      ...(order === "output-first" ? { onWrite() { controller.abort(); } } : {}),
+    });
+    assert.equal(result.code, outputFailure === "EIO" ? 5 : 3, `${outputFailure}:${order}`);
+    assert.equal(result.records.length, 1); assert.equal(result.calls.control.filter((call) => call.startsWith("wait:")).length, 1);
+    assert.equal(result.calls.aborts, 1); assert.deepEqual(result.calls.closed, ["owner", "session"]); assert.equal(result.outputListeners, 0);
+    assert.equal(result.stdout.includes("request-cancelled"), false); assert.equal(result.stderr, "");
+  }
+});
+
+await test("observation output failures never retry or leak their raw cause", async () => {
+  for (const [outputFailure, expected] of [["EPIPE", 3], ["close", 3], ["EIO", 5]] as const) {
+    const value = fixture();
+    const result = await invoke(["stream", "wait", "--stream-id", STREAM, "--after-revision", "1", "--json"], { fixture: value, outputFailure });
+    assert.equal(result.code, expected, outputFailure);
+    assert.equal(result.stdout.includes("private output cause"), false);
+    assert.equal(result.stderr, "");
+    assert.equal(result.calls.control.filter((call) => call.startsWith("wait:")).length, 1);
+    assert.deepEqual(result.calls.closed, ["owner", "session"]);
+  }
+});
+
+await test("failed records do not advance or issue a second provider wait", async () => {
+  const watch = fixture();
+  watch.setControl("wait", [observed(snapshot(2)), observed(snapshot(3, "stopped"))]);
+  const failedRecord = await invoke(["stream", "watch", "--stream-id", STREAM, "--after-revision", "1", "--json-seq"], { fixture: watch, outputFailure: "EPIPE" });
+  assert.equal(failedRecord.code, 3);
+  assert.equal(failedRecord.calls.control.filter((call) => call.startsWith("wait:")).length, 1);
+  assert.deepEqual(failedRecord.calls.closed, ["owner", "session"]);
+});
 await test("maps approve and shutdown only through owner-local lookup", async () => {
   const approve = await invoke(["viewer", "approve", "--stream-id", STREAM, "--code", "01234567"]);
   assert.deepEqual(approve.calls.acquire, []);

@@ -23,13 +23,20 @@ function question(prompt: string, signal?: AbortSignal): Promise<string | undefi
 }
 
 const controller = new AbortController();
-const cancel = (): void => controller.abort();
-process.once("SIGINT", cancel);
-process.once("SIGTERM", cancel);
+let firstSignal = false;
+const signal = (received: "SIGINT" | "SIGTERM"): void => {
+  if (!firstSignal) { firstSignal = true; controller.abort(); return; }
+  process.removeListener("SIGINT", interrupt);
+  process.removeListener("SIGTERM", terminate);
+  process.kill(process.pid, received);
+};
+const interrupt = (): void => signal("SIGINT"), terminate = (): void => signal("SIGTERM");
+process.on("SIGINT", interrupt);
+process.on("SIGTERM", terminate);
 const io: CliIo = { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, question };
 try {
   process.exitCode = await executeCli(process.argv.slice(2), io, undefined, controller.signal);
 } finally {
-  process.removeListener("SIGINT", cancel);
-  process.removeListener("SIGTERM", cancel);
+  process.removeListener("SIGINT", interrupt);
+  process.removeListener("SIGTERM", terminate);
 }
