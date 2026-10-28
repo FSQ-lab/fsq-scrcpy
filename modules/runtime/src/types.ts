@@ -3,10 +3,11 @@ export type MediaProfile = "h264-annexb" | "mjpeg";
 export type EnsureRequest = Readonly<{ deviceRef: DeviceRef; idempotencyKey: string }>;
 export type ApproveRequest = Readonly<{ streamId: StreamId; pairingId: string; pairingCode: string; viewerGrant: ViewerGrant }>;
 export type InspectRequest = Readonly<{ streamId: StreamId; afterRevision?: number }>;
+export type WaitRequest = Readonly<{ streamId: StreamId; afterRevision: number; waitMs: number }>;
 export type StopRequest = Readonly<{ streamId: StreamId; expectedRevision?: number; reason: "explicit-stop" }>;
 export type EnsureResult = Readonly<{ ok: true; value: Readonly<{ access: ViewerAccess; snapshot: StreamSnapshot }> }> | Readonly<{ ok: false; error: StreamError }>;
 export type ApproveResult = Readonly<{ ok: true; value: Readonly<{ snapshot: StreamSnapshot; approvedAt: number }> }> | Readonly<{ ok: false; error: StreamError }>;
-export type InspectResult = Readonly<{ ok: true; value: Readonly<{ snapshot: StreamSnapshot; changes: readonly StreamSnapshot[]; reset: boolean }> }> | Readonly<{ ok: false; error: StreamError }>;
+export type InspectResult = Readonly<{ ok: true; value: Readonly<{ snapshot: StreamSnapshot; changes: readonly StreamSnapshot[]; reset: boolean; timedOut: boolean }> }> | Readonly<{ ok: false; error: StreamError }>;
 export type StopResult = Readonly<{ ok: true; value: Readonly<{ snapshot: StreamSnapshot }> }> | Readonly<{ ok: false; error: StreamError }> | Readonly<{ ok: false; error: StreamError; snapshot: StreamSnapshot }>;
 export type ViewerAssetRole = "entry-module" | "worker-module" | "style";
 export interface ViewerAssetEntry { readonly role: ViewerAssetRole; readonly name: string; readonly sha256: string; readonly mime: "text/javascript; charset=utf-8" | "text/css; charset=utf-8" }

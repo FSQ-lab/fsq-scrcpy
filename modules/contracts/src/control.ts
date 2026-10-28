@@ -16,13 +16,15 @@ export const CONTROL_VERSION = Object.freeze({ major: 1 as const, minor: 0 as co
 export type ControlVersion = Readonly<{ major: 1; minor: 0 }>;
 export type RuntimeTarget = Readonly<{ instanceId: string; generation: string }>;
 export type DeviceSelector = Readonly<{ kind: "auto"; platform: "android" }> | Readonly<{ kind: "known"; deviceRef: DeviceRef }>;
-export type RuntimeInstance = Readonly<{ controlVersion: ControlVersion; instanceId: string; generation: string; contractVersion: 2; deviceRef: DeviceRef; features: readonly [] }>;
+export type RuntimeInstance = Readonly<{ controlVersion: ControlVersion; instanceId: string; generation: string; contractVersion: 2; deviceRef: DeviceRef; features: readonly ["wait-v1"] }>;
 export type RuntimeAttachment = Readonly<{ disposition: "started" | "attached"; instance: RuntimeInstance }>;
 export type AcquireRuntimeRequest = Readonly<{ mode: "attach-only" | "start-or-attach"; selector: DeviceSelector }>;
+export type WaitControlRequest = Readonly<{ streamId: StreamId; afterRevision: number; waitMs: number }>;
+export type WaitControlWireRequest = Readonly<{ controlVersion: ControlVersion; target: RuntimeTarget; streamId: StreamId; afterRevision: number; waitMs: number }>;
 export type AcquireRuntimeValue = Readonly<{ attachment: RuntimeAttachment }>;
 export type HelloControlValue = Readonly<{ instance: RuntimeInstance }>;
 export type EnsureViewerValue = Readonly<{ deviceRef: DeviceRef; descriptor: ViewerDescriptor; snapshot: StreamSnapshot }>;
-export type InspectControlValue = Readonly<{ snapshot: StreamSnapshot; changes: readonly StreamSnapshot[]; reset: boolean }>;
+export type InspectControlValue = Readonly<{ snapshot: StreamSnapshot; changes: readonly StreamSnapshot[]; reset: boolean; timedOut: boolean }>;
 export type StopStreamValue = Readonly<{ snapshot: StreamSnapshot }>;
 export type ApproveViewerValue = Readonly<{ snapshot: StreamSnapshot; approvedAt: number }>;
 export type ShutdownRuntimeValue = Readonly<{ instanceId: string; generation: string }>;
@@ -73,8 +75,10 @@ export function validateDeviceSelector(value: unknown): DeviceSelector {
   const v = exact(object, ["kind", "deviceRef"]); if (v.kind !== "known") return fail(); const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") return fail(); return object as DeviceSelector;
 }
 export function validateAcquireRuntimeRequest(value: unknown): AcquireRuntimeRequest { const v = exact(value, ["mode", "selector"]); if (v.mode !== "attach-only" && v.mode !== "start-or-attach") fail(); validateDeviceSelector(v.selector); return value as AcquireRuntimeRequest; }
+export function validateWaitControlRequest(value: unknown): WaitControlRequest { const v = exact(value, ["streamId", "afterRevision", "waitMs"]); validateStreamId(v.streamId); safeInteger(v.afterRevision, 1); if (safeInteger(v.waitMs) > 30_000) fail(); return value as WaitControlRequest; }
+export function validateWaitControlWireRequest(value: unknown): WaitControlWireRequest { const v = exact(value, ["controlVersion", "target", "streamId", "afterRevision", "waitMs"]); validateControlVersion(v.controlVersion); validateRuntimeTarget(v.target); validateWaitControlRequest({ streamId: v.streamId, afterRevision: v.afterRevision, waitMs: v.waitMs }); return value as WaitControlWireRequest; }
 export function validateRuntimeInstance(value: unknown): RuntimeInstance {
-  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 1 || v.features.length !== 0) fail(); const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") fail(); return value as RuntimeInstance;
+  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 2 || v.features.length !== 1 || v.features[0] !== "wait-v1") fail(); const descriptor = Object.getOwnPropertyDescriptor(v.features, "0"); if (!descriptor?.enumerable || !("value" in descriptor)) fail(); const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") fail(); return value as RuntimeInstance;
 }
 export function validateRuntimeAttachment(value: unknown): RuntimeAttachment { const v = exact(value, ["disposition", "instance"]); if (v.disposition !== "started" && v.disposition !== "attached") fail(); validateRuntimeInstance(v.instance); return value as RuntimeAttachment; }
 export function validateControlError(value: unknown): ControlError {
@@ -93,11 +97,11 @@ export function validateControlWireValue(value: unknown): ControlWireValue {
   if (has(["attachment"])) { validateRuntimeAttachment(object.attachment); return object as AcquireRuntimeValue; }
   if (has(["instance"])) { validateRuntimeInstance(object.instance); return object as HelloControlValue; }
   if (has(["deviceRef", "descriptor", "snapshot"])) { const device = validateDeviceRef(object.deviceRef), descriptor = validateViewerDescriptor(object.descriptor), snapshot = validateStreamSnapshot(object.snapshot); if (descriptor.streamId !== snapshot.streamId || !sameDevice(device, snapshot.deviceRef)) return fail(); return object as EnsureViewerValue; }
-  if (has(["snapshot", "changes", "reset"])) {
+  if (has(["snapshot", "changes", "reset", "timedOut"])) {
     const snapshot = validateStreamSnapshot(object.snapshot), changes = object.changes;
     if (!Array.isArray(changes) || changes.length > 16 || Object.getPrototypeOf(changes) !== Array.prototype || Reflect.ownKeys(changes).length !== changes.length + 1) return fail();
-    let revision = 0; for (let index = 0; index < changes.length; index++) { const descriptor = Object.getOwnPropertyDescriptor(changes, String(index)); if (!descriptor?.enumerable || !("value" in descriptor)) return fail(); const change = validateStreamSnapshot(descriptor.value); if (change.streamId !== snapshot.streamId || change.revision <= revision || change.revision > snapshot.revision) return fail(); revision = change.revision; }
-    if (typeof object.reset !== "boolean" || (object.reset && changes.length !== 0)) return fail(); return object as InspectControlValue;
+    let revision = 0; for (let index = 0; index < changes.length; index++) { const descriptor = Object.getOwnPropertyDescriptor(changes, String(index)); if (!descriptor?.enumerable || !("value" in descriptor)) return fail(); const change = validateStreamSnapshot(descriptor.value); if (change.streamId !== snapshot.streamId || !sameDevice(change.deviceRef, snapshot.deviceRef) || change.revision <= revision || change.revision > snapshot.revision) return fail(); revision = change.revision; }
+    if ((changes.length > 0 && revision !== snapshot.revision) || typeof object.reset !== "boolean" || typeof object.timedOut !== "boolean" || (object.reset && (changes.length !== 0 || object.timedOut)) || (object.timedOut && (changes.length !== 0 || object.reset))) return fail(); return object as InspectControlValue;
   }
   if (has(["snapshot"])) { validateStreamSnapshot(object.snapshot); return object as StopStreamValue; }
   if (has(["snapshot", "approvedAt"])) { validateStreamSnapshot(object.snapshot); safeInteger(object.approvedAt); return object as ApproveViewerValue; }
@@ -126,12 +130,12 @@ const ORDERS = [
   ["major", "minor"], ["instanceId", "generation"], ["contractVersion", "platform", "namespace", "opaqueId"],
   ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"], ["disposition", "instance"],
   ["controlVersion", "code", "disposition", "operationState", "safeMessage"], ["descriptor"], ["attachment"], ["instance"],
-  ["deviceRef", "descriptor", "snapshot"], ["snapshot", "changes", "reset"], ["snapshot"], ["snapshot", "approvedAt"],
+  ["deviceRef", "descriptor", "snapshot"], ["snapshot", "changes", "reset", "timedOut"], ["snapshot"], ["snapshot", "approvedAt"],
   ["streamId", "deviceRef", "revision", "phase", "reason", "epoch", "codedSize", "displaySize", "activeViewerCount", "updatedAt"],
   ["width", "height"], ["contractVersion", "streamId", "standaloneUri", "presentationModes", "expiresAt"],
   ["controlVersion", "contractVersion", "deviceRef", "expectedInstance"], ["controlVersion", "target"],
-  ["controlVersion", "target", "streamId", "afterRevision"], ["controlVersion", "target", "streamId", "expectedRevision"],
-  ["controlVersion", "target", "streamId", "pairingCode"], ["kind", "platform"], ["kind", "deviceRef"], ["mode", "selector"],
+  ["controlVersion", "target", "streamId", "afterRevision"], ["controlVersion", "target", "streamId", "afterRevision", "waitMs"], ["controlVersion", "target", "streamId", "expectedRevision"],
+  ["controlVersion", "target", "streamId", "pairingCode"], ["streamId", "afterRevision", "waitMs"], ["kind", "platform"], ["kind", "deviceRef"], ["mode", "selector"],
 ] as const;
 function orderFor(keys: readonly string[]): readonly string[] {
   for (const order of ORDERS) { const candidate: readonly string[] = order; if (keys.every((key) => candidate.includes(key)) && candidate.filter((key) => keys.includes(key)).length === keys.length) return candidate.filter((key) => keys.includes(key)); }
@@ -162,6 +166,7 @@ export function parseCanonicalControlJson(bytes: Uint8Array, maxBytes = 16_384):
 export interface RuntimeControl {
   ensureViewer(options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<EnsureViewerValue>>;
   inspect(input: Readonly<{ streamId: StreamId; afterRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<InspectControlValue>>;
+  wait(input: WaitControlRequest, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<InspectControlValue>>;
   stopStream(input: Readonly<{ streamId: StreamId; expectedRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<StopStreamResult>;
   close(): Promise<void>;
 }
@@ -176,4 +181,4 @@ export class RuntimeControlSession implements AsyncDisposable {
   [Symbol.asyncDispose](): Promise<void> { return this.close(); }
 }
 Object.defineProperty(RuntimeControlSession.prototype, inspect.custom, { value(this: RuntimeControlSession) { return this.toValue(); } });
-function deepFreezeAttachment(value: RuntimeAttachment): RuntimeAttachment { const deviceRef = frozen({ ...value.instance.deviceRef }); const controlVersion = frozen({ ...value.instance.controlVersion }); const features = Object.freeze([]) as readonly []; const instance = frozen({ ...value.instance, controlVersion, deviceRef, features }); return frozen({ disposition: value.disposition, instance }); }
+function deepFreezeAttachment(value: RuntimeAttachment): RuntimeAttachment { const deviceRef = frozen({ ...value.instance.deviceRef }); const controlVersion = frozen({ ...value.instance.controlVersion }); const features = Object.freeze(["wait-v1"] as const); const instance = frozen({ ...value.instance, controlVersion, deviceRef, features }); return frozen({ disposition: value.disposition, instance }); }

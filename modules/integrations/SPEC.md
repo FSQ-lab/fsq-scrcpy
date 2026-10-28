@@ -75,3 +75,10 @@ fsq-scrcpy local-state rebind-device --platform android --device-ref <uuid> [--j
 ## Required Acceptance
 
 Contract tests须覆盖实际pack/install/bin/shebang、全部syntax边界、human/JSON parity、exit映射、TTY拒绝/确认、stdout/stderr界线与隐私canary。真实macOS Android入口须完成 fresh ensure→Chrome pairing→fresh Live/rotation→inspect→stop且Runtime仍活→ensure新StreamId→shutdown，并验证 client exit不停止Runtime、reset/rebind的live/unknown/corrupt/stale/decline/race均零mutation，confirmed reset保留DeviceRef，confirmed rebind生成新DeviceRef，global ADB与设备设置不受影响。通过仍不建立平台支持条目。
+
+## RuntimeControl Wait Value Migration
+
+本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` clean cutover对既有调用方的窄增量，不预建后续CLI wait/watch。
+
+- 命令列表、parseArgs grammar、exit/render/TTY/packaging保持不变，不新增`stream wait`或`stream watch`。`viewer ensure`继续原样组合Contracts safe DTO，但attachment中的`RuntimeInstance.features`改为exact `["wait-v1"]`；`stream inspect`继续原样返回observation，但新增exact `timedOut:false`。
+- Integrations validator/fixture/contract tests必须一次性迁移，证明pretty/compact decode后deep-equal、新tuple与四字段inspect精确、旧/额外feature及三字段inspect拒绝；其他命令结果与隐私边界no-delta。

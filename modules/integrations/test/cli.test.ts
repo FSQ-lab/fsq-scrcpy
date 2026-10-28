@@ -22,7 +22,7 @@ const NEXT = "523e4567-e89b-42d3-a456-426614174000";
 const DEVICE: DeviceRef = Object.freeze({ contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: ID });
 const NEXT_DEVICE: DeviceRef = Object.freeze({ ...DEVICE, opaqueId: NEXT });
 const SNAPSHOT: StreamSnapshot = Object.freeze({ streamId: STREAM, deviceRef: DEVICE, revision: 1, phase: "demand-pending", activeViewerCount: 0, updatedAt: 1 });
-const ATTACHMENT: RuntimeAttachment = Object.freeze({ disposition: "attached", instance: Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: INSTANCE, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze([] as []) }) });
+const ATTACHMENT: RuntimeAttachment = Object.freeze({ disposition: "attached", instance: Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: INSTANCE, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1"] as const) }) });
 const STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ platform: "android" as const, state: "ready" as const, deviceRef: DEVICE, stateRevision: 7, runtime: Object.freeze({ state: "not-running" as const }) }) });
 const LIVE_STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ ...STATUS.value, runtime: Object.freeze({ state: "live" as const, target: Object.freeze({ instanceId: INSTANCE, generation: GENERATION }) }) }) });
 const UNINITIALIZED = Object.freeze({ ok: true as const, value: Object.freeze({ platform: "android" as const, state: "uninitialized" as const }) });
@@ -35,7 +35,7 @@ function fixture(): Fixture {
   let status: unknown = STATUS, acquireCause: unknown;
   const values: Record<string, unknown> = {
     ensure: { ok: true, value: { deviceRef: DEVICE, descriptor: DESCRIPTOR, snapshot: SNAPSHOT } },
-    inspect: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false } },
+    inspect: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false } },
     stop: { ok: true, value: { snapshot: SNAPSHOT } },
     approve: { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 2 } },
     shutdown: { ok: true, value: { instanceId: INSTANCE, generation: GENERATION } },
@@ -45,6 +45,7 @@ function fixture(): Fixture {
   const control: RuntimeControl = {
     async ensureViewer(options) { calls.control.push(`ensure:${Boolean(options?.signal)}`); return values.ensure as never; },
     async inspect(input, options) { calls.control.push(`inspect:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.inspect as never; },
+    async wait() { throw new Error("CLI must not call wait"); },
     async stopStream(input, options) { calls.control.push(`stop:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.stop as never; },
     async close() { calls.closed.push("control"); },
   };
@@ -103,6 +104,8 @@ await test("rejects every malformed grammar before product I/O with deterministi
     ["local-state", "status", "--platform", "android", "--unknown"],
     ["local-state", "reset-control", "--platform", "android"],
     ["local-state", "rebind-device", "--platform", "android", "--device-ref", ID, "--force"],
+    ["stream", "wait", "--stream-id", STREAM, "--after-revision", "1"],
+    ["stream", "watch", "--stream-id", STREAM],
   ];
   for (const args of invalid) {
     const value = fixture(), result = await invoke(args, { fixture: value });
@@ -123,8 +126,10 @@ await test("maps auto and known ensure to the only allowed selectors and safe co
   assert.deepEqual(auto.calls.owner, []);
   assert.deepEqual(auto.calls.acquire[0], { request: { mode: "start-or-attach", selector: { kind: "auto", platform: "android" } }, signal: false });
   assert.deepEqual((auto.value.value as Record<string, unknown>).attachment, ATTACHMENT);
+  assert.deepEqual((((auto.value.value as Record<string, unknown>).attachment as RuntimeAttachment).instance.features), ["wait-v1"]);
   const known = await invoke(["viewer", "ensure", "--device-ref", ID, "--json"]);
   assert.equal(known.stdout.includes("\n  \""), false);
+  assert.deepEqual(known.value, auto.value);
   assert.deepEqual(known.calls.owner, ["status:false"]);
   assert.deepEqual(known.calls.acquire[0], { request: { mode: "start-or-attach", selector: { kind: "known", deviceRef: DEVICE } }, signal: false });
   assert.deepEqual(known.calls.closed.sort(), ["owner", "session"]);
@@ -135,6 +140,9 @@ await test("maps inspect and stop through status plus attach-only without spawni
   const inspect = await invoke(["stream", "inspect", "--stream-id", STREAM, "--after-revision=9"], { signal: controller.signal });
   assert.deepEqual(inspect.calls.acquire[0], { request: { mode: "attach-only", selector: { kind: "known", deviceRef: DEVICE } }, signal: true });
   assert.equal(inspect.calls.control[0], `inspect:${JSON.stringify({ streamId: STREAM, afterRevision: 9 })}:true`);
+  assert.deepEqual(inspect.value.value, { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false });
+  const compact = await invoke(["stream", "inspect", "--stream-id", STREAM, "--after-revision=9", "--json"], { signal: controller.signal });
+  assert.deepEqual(compact.value, inspect.value); assert.equal(compact.stdout.includes("\n  \""), false);
   const stop = await invoke(["stream", "stop", "--stream-id", STREAM, "--expected-revision", "8"]);
   assert.equal(stop.calls.control[0], `stop:${JSON.stringify({ streamId: STREAM, expectedRevision: 8 })}:false`);
   assert.deepEqual(stop.calls.owner, ["status:false"]);
@@ -231,15 +239,17 @@ await test("malformed and thrown runtime values become privacy-safe state-unknow
     assert.equal(result.code, 5); assert.equal((result.value.error as Record<string, unknown>).code, "runtime-exited");
     assert.equal(`${result.stdout}${result.stderr}`.includes(canary), false);
   }
-  const malformed = fixture(); malformed.setControl("inspect", { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, serial: "secret" } });
+  const malformed = fixture(); malformed.setControl("inspect", { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false, serial: "secret" } });
   const result = await invoke(["stream", "inspect", "--stream-id", STREAM], { fixture: malformed });
   assert.equal(result.code, 5); assert.equal(result.stdout.includes("secret"), false);
 });
 
 await test("every noninteractive result has one LF, JSON parity, and empty stderr", async () => {
-  const pretty = await invoke(["local-state", "status", "--platform", "android"]), compact = await invoke(["local-state", "status", "--platform", "android", "--json"]);
-  assert.equal(pretty.stdout.endsWith("\n"), true); assert.equal(pretty.stdout.endsWith("\n\n"), false);
-  assert.equal(compact.stdout.endsWith("\n"), true); assert.equal(compact.stdout.endsWith("\n\n"), false);
-  assert.deepEqual(JSON.parse(pretty.stdout), JSON.parse(compact.stdout));
-  assert.equal(pretty.stderr, ""); assert.equal(compact.stderr, "");
+  for (const args of [["local-state", "status", "--platform", "android"], ["viewer", "ensure", "--platform", "android"], ["stream", "inspect", "--stream-id", STREAM]] as const) {
+    const pretty = await invoke(args), compact = await invoke([...args, "--json"]);
+    assert.equal(pretty.stdout.endsWith("\n"), true); assert.equal(pretty.stdout.endsWith("\n\n"), false);
+    assert.equal(compact.stdout.endsWith("\n"), true); assert.equal(compact.stdout.endsWith("\n\n"), false);
+    assert.deepEqual(JSON.parse(pretty.stdout), JSON.parse(compact.stdout));
+    assert.equal(pretty.stderr, ""); assert.equal(compact.stderr, "");
+  }
 });

@@ -29,7 +29,7 @@ const ATTACHMENT: RuntimeAttachment = Object.freeze({
     generation: GENERATION,
     contractVersion: 2,
     deviceRef: DEVICE,
-    features: Object.freeze([] as []),
+    features: Object.freeze(["wait-v1"] as const),
   }),
 });
 const DESCRIPTOR = Object.freeze({
@@ -46,21 +46,22 @@ interface Harness {
   controlResult: unknown;
   statusResult: unknown;
 }
-function harness(): Harness {
+function harness(attachment: unknown = ATTACHMENT): Harness {
   const value: Harness = {
     touches: [],
-    controlResult: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false } },
+    controlResult: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false } },
     statusResult: { ok: true, value: { platform: "android", state: "ready", deviceRef: DEVICE, stateRevision: 1, runtime: { state: "not-running" } } },
     dependencies: undefined as never,
   };
   const control: RuntimeControl = {
     async ensureViewer() { value.touches.push("ensure"); return value.controlResult as never; },
     async inspect() { value.touches.push("inspect"); return value.controlResult as never; },
+    async wait() { throw new Error("CLI must not call wait"); },
     async stopStream() { value.touches.push("stop"); return value.controlResult as never; },
     async close() { value.touches.push("control-close"); },
   };
   const session = {
-    attachment: ATTACHMENT,
+    attachment: attachment as RuntimeAttachment,
     control,
     async close() { value.touches.push("session-close"); },
   } as unknown as RuntimeControlSession;
@@ -157,9 +158,10 @@ await test("half-TTY maintenance never creates the owner seam or writes a prompt
   }
 });
 
-await test("strict operation validators reject wrong success variants and additional fields", async () => {
+await test("strict operation validators reject legacy and additional fields", async () => {
   const malformed: readonly [readonly string[], unknown][] = [
     [["stream", "inspect", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT } }],
+    [["stream", "inspect", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false } }],
     [["stream", "stop", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT, extra: true } }],
     [["viewer", "approve", "--stream-id", STREAM_ID, "--code", "01234567"], { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 1, pairingId: "private" } }],
     [["runtime", "shutdown", "--device-ref", DEVICE_ID], { ok: true, value: { instanceId: INSTANCE_ID, generation: GENERATION, port: 49152 } }],
@@ -172,6 +174,15 @@ await test("strict operation validators reject wrong success variants and additi
     assert.equal((result.value.error as Record<string, unknown>).code, "runtime-exited");
     assert.equal(result.stdout.includes("private"), false);
     assert.equal(result.stdout.includes("49152"), false);
+  }
+});
+await test("viewer ensure rejects legacy and extra Runtime feature tuples", async () => {
+  for (const features of [[], ["wait-v1", "extra"]]) {
+    const attachment = { ...ATTACHMENT, instance: { ...ATTACHMENT.instance, features } };
+    const result = await run(["viewer", "ensure", "--platform", "android"], harness(attachment));
+    assert.equal(result.code, 5);
+    assert.equal((result.value.error as Record<string, unknown>).code, "runtime-exited");
+    assert.equal(result.stdout.includes("extra"), false);
   }
 });
 

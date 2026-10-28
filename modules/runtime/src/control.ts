@@ -20,6 +20,8 @@ import {
   validateShutdownRuntimeValue,
   validateStopStreamValue,
   validateRuntimeTarget,
+  validateWaitControlRequest,
+  validateWaitControlWireRequest,
   type ApproveViewerValue,
   type ControlError,
   type ControlErrorCode,
@@ -35,6 +37,7 @@ import {
   type ShutdownRuntimeValue,
   type StopStreamResult,
   type StopStreamValue,
+  type WaitControlRequest,
 } from "../../contracts/src/index.js";
 import type { AndroidRuntimeSlot, RuntimeGenerationState } from "./control-state.js";
 import { MutationCancelled } from "./state.js";import type { RuntimeService } from "./index.js";
@@ -50,7 +53,7 @@ export interface RuntimeControlHostOptions {
   readonly service?: RuntimeService;readonly slot: AndroidRuntimeSlot;readonly generation: RuntimeGenerationState;readonly onShutdown: () => Promise<void>;readonly timer?:ControlTimer;
 }
 const ROUTES = Object.freeze({
-  "/v1/control/hello": "client", "/v1/viewer/ensure": "client", "/v1/stream/inspect": "client", "/v1/stream/stop": "client",
+  "/v1/control/hello": "client", "/v1/viewer/ensure": "client", "/v1/stream/inspect": "client", "/v1/stream/wait": "client", "/v1/stream/stop": "client",
   "/v1/viewer/approve": "owner", "/v1/runtime/shutdown": "owner",
 } as const);
 type Route = keyof typeof ROUTES;
@@ -75,36 +78,59 @@ function captureError(code: string): ControlErrorCode { return (["malformed-cont
 function cancelled(signal: AbortSignal | undefined): Readonly<{ ok: false; error: ControlError }> | undefined { return signal?.aborted ? fail("request-cancelled") : undefined; }
 const signalOptions=(signal?:AbortSignal):Readonly<{signal?:AbortSignal}>|undefined=>signal?{signal}:undefined;
 const waitReady = (ready: Promise<void>, milliseconds: number,timer:ControlTimer): Promise<void> => new Promise((resolve) => { const deadline=armControlDeadline(timer,milliseconds,resolve); ready.then(() => { deadline.clear(); resolve(); }); });
-const ROUTE_ERRORS:Readonly<Record<Route,ReadonlySet<ControlErrorCode>>>=Object.freeze({"/v1/control/hello":new Set<ControlErrorCode>(["control-version-mismatch","instance-conflict","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/ensure":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/stream/inspect":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/stop":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/approve":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/runtime/shutdown":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"])});
+const ROUTE_ERRORS:Readonly<Record<Route,ReadonlySet<ControlErrorCode>>>=Object.freeze({"/v1/control/hello":new Set<ControlErrorCode>(["control-version-mismatch","instance-conflict","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/ensure":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/stream/inspect":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/wait":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/stop":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/approve":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/runtime/shutdown":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"])});
+function helloFeatureMismatch(value:unknown):boolean{
+  if(!ordinary(value)||value.ok!==true||!ordinary(value.value)||!ordinary(value.value.instance))return false;
+  const features=value.value.instance.features;
+  if(!Array.isArray(features)||Object.getPrototypeOf(features)!==Array.prototype||features.length!==0||Reflect.ownKeys(features).length!==1)return false;
+  try{validateControlResult({...value,value:{...value.value,instance:{...value.value.instance,features:["wait-v1"]}}});return true;}catch{return false;}
+}
 function responseHeader(response:IncomingMessage,name:string):string{const values:string[]=[];for(let index=0;index<response.rawHeaders.length;index+=2)if(response.rawHeaders[index]!.toLowerCase()===name)values.push(response.rawHeaders[index+1]??"");if(values.length!==1)throw new TypeError("Invalid control response");return values[0]!;}
-function decodeRouteResponse(route:Route,response:IncomingMessage,bytes:Uint8Array):ReturnType<typeof validateControlResult>{const contentType=responseHeader(response,"content-type"),length=responseHeader(response,"content-length"),cache=responseHeader(response,"cache-control"),nosniff=responseHeader(response,"x-content-type-options");if(contentType!=="application/json; charset=utf-8"||!/^(?:0|[1-9][0-9]*)$/.test(length)||Number(length)!==bytes.byteLength||cache!=="no-store"||nosniff!=="nosniff")throw new TypeError("Invalid control response");const result=validateControlResult(parseCanonicalControlJson(bytes));if(result.ok){if(response.statusCode!==200)throw new TypeError("Invalid control response");if(route==="/v1/control/hello")validateHelloControlValue(result.value);else if(route==="/v1/viewer/ensure")validateEnsureViewerValue(result.value);else if(route==="/v1/stream/inspect")validateInspectControlValue(result.value);else if(route==="/v1/stream/stop")validateStopStreamValue(result.value);else if(route==="/v1/viewer/approve")validateApproveViewerValue(result.value);else validateShutdownRuntimeValue(result.value);return result;}if(result.error.code==="revision-conflict"){if(route!=="/v1/stream/stop"||response.statusCode!==409||!("snapshot"in result))throw new TypeError("Invalid control response");return result;}if(!ROUTE_ERRORS[route].has(result.error.code)||response.statusCode!==controlErrorStatus(result.error)||"snapshot"in result)throw new TypeError("Invalid control response");return result;}
+function decodeRouteResponse(route:Route,response:IncomingMessage,bytes:Uint8Array):ReturnType<typeof validateControlResult>{const contentType=responseHeader(response,"content-type"),length=responseHeader(response,"content-length"),cache=responseHeader(response,"cache-control"),nosniff=responseHeader(response,"x-content-type-options");if(contentType!=="application/json; charset=utf-8"||!/^(?:0|[1-9][0-9]*)$/.test(length)||Number(length)!==bytes.byteLength||cache!=="no-store"||nosniff!=="nosniff")throw new TypeError("Invalid control response");const parsed=parseCanonicalControlJson(bytes);let result:ReturnType<typeof validateControlResult>;try{result=validateControlResult(parsed);}catch{if(route==="/v1/control/hello"&&response.statusCode===200&&helloFeatureMismatch(parsed))return fail("control-version-mismatch");throw new TypeError("Invalid control response");}if(result.ok){if(response.statusCode!==200)throw new TypeError("Invalid control response");if(route==="/v1/control/hello")validateHelloControlValue(result.value);else if(route==="/v1/viewer/ensure")validateEnsureViewerValue(result.value);else if(route==="/v1/stream/inspect"||route==="/v1/stream/wait")validateInspectControlValue(result.value);else if(route==="/v1/stream/stop")validateStopStreamValue(result.value);else if(route==="/v1/viewer/approve")validateApproveViewerValue(result.value);else validateShutdownRuntimeValue(result.value);return result;}if(result.error.code==="revision-conflict"){if(route!=="/v1/stream/stop"||response.statusCode!==409||!("snapshot"in result))throw new TypeError("Invalid control response");return result;}if(!ROUTE_ERRORS[route].has(result.error.code)||response.statusCode!==controlErrorStatus(result.error)||"snapshot"in result)throw new TypeError("Invalid control response");return result;}
 
 export class RuntimeControlProvider {
   readonly instance: RuntimeInstance;
   #service: RuntimeService; #shutdown: () => Promise<void>; #shuttingDown = false; #ready = false;
   constructor(service: RuntimeService, slot: AndroidRuntimeSlot, generation: RuntimeGenerationState, shutdown: () => Promise<void>) {
     this.#service = service; this.#shutdown = shutdown;
-    this.instance = frozen({ controlVersion: CONTROL_VERSION, instanceId: generation.instanceId, generation: generation.generation, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze([]) as readonly [] });
+    this.instance = frozen({ controlVersion: CONTROL_VERSION, instanceId: generation.instanceId, generation: generation.generation, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1"] as const) });
   }
   markReady(): void { this.#ready = true; }
   hello(expected: RuntimeTarget | null): ControlResult<HelloControlValue> { if (!this.#ready || this.#shuttingDown) return fail("runtime-exited"); if (expected && !targetEqual(expected, this.instance)) return fail("instance-conflict"); return ok(frozen({ instance: this.instance })); }
   async ensureViewer(options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<EnsureViewerValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (!this.#ready || this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.ensureControlViewer(this.instance.deviceRef,options?.signal); if (!result.ok) return fail(captureError(result.error.code)); return ok(frozen({ deviceRef: result.value.snapshot.deviceRef, descriptor: result.value.access.descriptor, snapshot: result.value.snapshot })); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
-  inspect(input: Readonly<{ streamId: string; afterRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): ControlResult<InspectControlValue> {
-    const aborted = cancelled(options?.signal); if (aborted) return aborted;
-    const result = this.#service.inspect(input); if (!result.ok) return fail("malformed-control");
-    const reset = result.value.changes.length > 16 || encodeCanonicalControlJson(result.value.changes).byteLength > 12_288;
-    return ok(frozen({ snapshot: result.value.snapshot, changes: reset ? Object.freeze([]) : result.value.changes, reset: reset || result.value.reset }));
+  #observation(result:ReturnType<RuntimeService["inspectControl"]>):ControlResult<InspectControlValue>{
+    if(!result.ok)return fail(result.error.code==="runtime-overload"?"runtime-overload":"malformed-control");
+    const source=result.value;
+    const fallback=()=>ok(frozen({snapshot:source.snapshot,changes:Object.freeze([]),reset:true,timedOut:false}));
+    let normalized=source.changes.length>16||encodeCanonicalControlJson(source.changes).byteLength>12_288
+      ?fallback()
+      :ok(frozen({snapshot:source.snapshot,changes:source.changes,reset:source.reset,timedOut:source.timedOut}));
+    let bytes=encodeCanonicalControlJson(normalized).byteLength;
+    if(bytes>16_384){
+      const emptyTerminal=source.changes.length===0&&["stopped","device-disconnected","failed"].includes(source.snapshot.phase);
+      if(source.timedOut||emptyTerminal)return fail("runtime-overload");
+      normalized=fallback();
+      bytes=encodeCanonicalControlJson(normalized).byteLength;
+    }
+    return bytes<=16_384?normalized:fail("runtime-overload");
+  }
+  inspect(input: Readonly<{ streamId: string; afterRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): ControlResult<InspectControlValue> { const aborted=cancelled(options?.signal);if(aborted)return aborted;return this.#observation(this.#service.inspectControl(input)); }
+  async wait(input:WaitControlRequest,options?:Readonly<{signal?:AbortSignal}>):Promise<ControlResult<InspectControlValue>>{
+    const aborted=cancelled(options?.signal);
+    if(aborted)return aborted;
+    try{return this.#observation(await this.#service.waitControl(input,options?.signal));}
+    catch(cause){if(cause instanceof MutationCancelled)return fail("request-cancelled");throw cause;}
   }
   async stopStream(input: Readonly<{ streamId: string; expectedRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<StopStreamResult> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.stopControl({ ...input, reason: "explicit-stop" },options?.signal); if (result.ok) return ok(frozen({ snapshot: result.value.snapshot })); if ("snapshot" in result) return frozen({ ok: false, error: revisionConflictError(), snapshot: result.snapshot }); return fail("malformed-control"); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
   async approveViewerPairing(input: Readonly<{ streamId: string; pairingCode: string }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.approveControlPairing(input.streamId, input.pairingCode,options?.signal); if (!result.ok) return fail(result.error.code === "unauthorized" ? "unauthorized" : "malformed-control"); return ok(frozen({ snapshot: result.value.snapshot, approvedAt: result.value.approvedAt })); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
   async shutdownRuntime(input: RuntimeTarget, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (!targetEqual(input, this.instance)) return fail("instance-conflict"); if (!this.#shuttingDown) { if(options?.signal?.aborted)return fail("request-cancelled");this.#shuttingDown = true; await this.#service.close(); } return ok(frozen({ instanceId: this.instance.instanceId, generation: this.instance.generation })); }
   completeShutdown():Promise<void>{return this.#shutdown();}
 }
-export interface ControlAdmissionSnapshot{readonly preauth:number;readonly authenticated:number;readonly inFlight:number}
+export interface ControlAdmissionSnapshot{readonly preauth:number;readonly authenticated:number;readonly inFlight:number;readonly waits:number}
 
 interface SocketState { authenticated?: "client" | "owner"; requests: number; inFlight: boolean; preauth: boolean;headerTimer?:ArmedDeadline }
 export class RuntimeControlHost {
-  #provider: RuntimeControlProvider | undefined; #slot: AndroidRuntimeSlot | undefined; #generation: RuntimeGenerationState | undefined; #shutdown: (() => Promise<void>) | undefined; #server: HttpServer | undefined; #sockets = new Map<Socket, SocketState>(); #authenticated = 0; #inFlight = 0; #client: Buffer; #owner: Buffer; #port: number; #ready = false; #readyPromise: Promise<void>; #resolveReady!: () => void;#timer:ControlTimer;
+  #provider: RuntimeControlProvider | undefined; #slot: AndroidRuntimeSlot | undefined; #generation: RuntimeGenerationState | undefined; #shutdown: (() => Promise<void>) | undefined; #server: HttpServer | undefined; #sockets = new Map<Socket, SocketState>(); #authenticated = 0; #inFlight = 0; #waits=0; #client: Buffer; #owner: Buffer; #port: number; #ready = false; #readyPromise: Promise<void>; #resolveReady!: () => void;#timer:ControlTimer;
   constructor(options: RuntimeControlHostOptions) { this.#timer=options.timer??SYSTEM_CONTROL_TIMER;this.#readyPromise = new Promise((resolve) => { this.#resolveReady = resolve; }); this.#slot = options.slot; this.#generation = options.generation; this.#shutdown = options.onShutdown; this.#client = derive(options.slot.control.credential, "client"); this.#owner = derive(options.slot.control.credential, "owner"); this.#port = options.slot.control.port; if (options.service) this.activate(options.service); }
   get provider(): RuntimeControlProvider { if (!this.#provider) throw new TypeError("Runtime control provider is not ready"); return this.#provider; }
   activate(service: RuntimeService): void { if (this.#provider || !this.#slot || !this.#generation || !this.#shutdown) throw new TypeError("Runtime control provider is already active"); this.#provider = new RuntimeControlProvider(service, this.#slot, this.#generation, this.#shutdown); this.#slot = undefined; this.#generation = undefined; this.#shutdown = undefined; }
@@ -116,7 +142,7 @@ export class RuntimeControlHost {
   }
   async close(): Promise<void> { const server = this.#server; this.#server = undefined; this.#resolveReady(); this.#client.fill(0); this.#owner.fill(0); this.#slot = undefined; this.#generation = undefined; this.#shutdown = undefined; this.#provider = undefined; for (const [socket,state] of this.#sockets){state.headerTimer?.clear();socket.destroy();} this.#sockets.clear(); if (server?.listening) await new Promise<void>((resolve) => server.close(() => resolve())); }
   ready(): void { this.provider.markReady(); this.#ready = true; this.#resolveReady(); }
-  admissionSnapshot():ControlAdmissionSnapshot{return Object.freeze({preauth:[...this.#sockets.values()].filter(state=>state.preauth).length,authenticated:this.#authenticated,inFlight:this.#inFlight});}
+  admissionSnapshot():ControlAdmissionSnapshot{return Object.freeze({preauth:[...this.#sockets.values()].filter(state=>state.preauth).length,authenticated:this.#authenticated,inFlight:this.#inFlight,waits:this.#waits});}
   #armHeader(socket:Socket,state:SocketState):void{state.headerTimer?.clear();state.headerTimer=armControlDeadline(this.#timer,CONTROL_DEADLINES.request,()=>{if(!state.preauth&&state.inFlight||socket.destroyed)return;const body='{"error":"request-timeout"}';socket.end(`HTTP/1.1 408 Request Timeout\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(body)}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n${body}`);});}
   async #handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const socket = request.socket as Socket, state = this.#sockets.get(socket); if (!state) return this.#transport(response, 429, "runtime-overload", true);state.headerTimer?.clear();delete state.headerTimer;
@@ -157,6 +183,27 @@ export class RuntimeControlHost {
     const target = safeTarget(body.target); if (!target) return fail("malformed-control"); if (!targetEqual(target, provider.instance)) return fail("instance-conflict");
     if (route === "/v1/viewer/ensure") return exact(body, ["controlVersion", "target"]) ? provider.ensureViewer(signalOptions(signal)) : fail("malformed-control");
     if (route === "/v1/stream/inspect") { if (!exact(body, ["controlVersion", "target", "streamId", "afterRevision"]) || !UUID.test(String(body.streamId)) || (body.afterRevision !== null && (!Number.isSafeInteger(body.afterRevision) || (body.afterRevision as number) < 1))) return fail("malformed-control"); return provider.inspect({ streamId: body.streamId as string, ...(body.afterRevision === null ? {} : { afterRevision: body.afterRevision as number }) },signalOptions(signal)); }
+    if(route==="/v1/stream/wait"){
+      let input:ReturnType<typeof validateWaitControlWireRequest>;
+      try{input=validateWaitControlWireRequest(body);}catch{return fail("malformed-control");}
+      if(this.#waits>=4)return fail("runtime-overload");
+      this.#waits++;
+      let expired=false;
+      const operation=new AbortController(),abort=()=>operation.abort();
+      if(signal?.aborted)abort();else signal?.addEventListener("abort",abort,{once:true});
+      const deadline=armControlDeadline(this.#timer,input.waitMs+CONTROL_DEADLINES.request,()=>{
+        expired=true;
+        operation.abort();
+      });
+      try{
+        const result=await provider.wait({streamId:input.streamId,afterRevision:input.afterRevision,waitMs:input.waitMs},signalOptions(operation.signal));
+        return expired?fail("deadline-exceeded"):result;
+      }finally{
+        deadline.clear();
+        signal?.removeEventListener("abort",abort);
+        this.#waits--;
+      }
+    }
     if (route === "/v1/stream/stop") { if (!exact(body, ["controlVersion", "target", "streamId", "expectedRevision"]) || !UUID.test(String(body.streamId)) || (body.expectedRevision !== null && (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 1))) return fail("malformed-control"); return provider.stopStream({ streamId: body.streamId as string, ...(body.expectedRevision === null ? {} : { expectedRevision: body.expectedRevision as number }) },signalOptions(signal)); }
     if (route === "/v1/viewer/approve") { if (!exact(body, ["controlVersion", "target", "streamId", "pairingCode"]) || !UUID.test(String(body.streamId))) return fail("malformed-control"); const pairingCode = body.pairingCode; if (typeof pairingCode !== "string" || !/^[0-9A-HJKMNP-TV-Z]{8}$/.test(pairingCode)) return fail("malformed-control"); return provider.approveViewerPairing({ streamId: String(body.streamId), pairingCode },signalOptions(signal)); }
     return exact(body, ["controlVersion", "target"]) ? provider.shutdownRuntime(target,signalOptions(signal)) : fail("malformed-control");
@@ -168,29 +215,59 @@ export class RuntimeControlHost {
 }
 function controlErrorStatusResult(result: { readonly ok: boolean; readonly error?: ControlError | RevisionConflictError }): number { return result.ok ? 200 : result.error ? controlErrorStatus(result.error) : 500; }
 class HttpRuntimeControl implements RuntimeControl {
-  #closed = false; #port: number; #target: RuntimeTarget; #bearer: string; readonly #agent = new Agent({ keepAlive: true, maxSockets: 8, timeout: 5000 });#timer:ControlTimer;
+  #closed = false; #port: number; #target: RuntimeTarget; #bearer: string; readonly #agent = new Agent({ keepAlive: true, maxSockets: 8 });#timer:ControlTimer;#activeWait:Promise<ControlResult<InspectControlValue>>|undefined;#waitAbort:AbortController|undefined;
   constructor(port: number, target: RuntimeTarget, bearer: string,timer:ControlTimer=SYSTEM_CONTROL_TIMER) { this.#port = port; this.#target = frozen({ ...target }); this.#bearer = bearer;this.#timer=timer; }
   get target(): RuntimeTarget { return this.#target; }
   ensureViewer(options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<EnsureViewerValue>> { return this.call("/v1/viewer/ensure", { controlVersion: CONTROL_VERSION, target: this.#target }, options) as Promise<ControlResult<EnsureViewerValue>>; }
   inspect(input: Readonly<{ streamId: string; afterRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<InspectControlValue>> { return this.call("/v1/stream/inspect", { controlVersion: CONTROL_VERSION, target: this.#target, streamId: input.streamId, afterRevision: input.afterRevision ?? null }, options) as Promise<ControlResult<InspectControlValue>>; }
+  wait(input:WaitControlRequest,options?:Readonly<{signal?:AbortSignal}>):Promise<ControlResult<InspectControlValue>>{
+    if(this.#closed)return Promise.resolve(fail("runtime-exited"));
+    let checked:ReturnType<typeof validateWaitControlRequest>;
+    try{checked=validateWaitControlRequest(input);}catch{return Promise.resolve(fail("malformed-control"));}
+    if(this.#activeWait)return Promise.resolve(fail("runtime-overload"));
+    const controller=new AbortController(),abort=()=>controller.abort();
+    this.#waitAbort=controller;
+    if(options?.signal?.aborted)abort();else options?.signal?.addEventListener("abort",abort,{once:true});
+    const pending=this.call("/v1/stream/wait",{
+      controlVersion:CONTROL_VERSION,
+      target:this.#target,
+      streamId:checked.streamId,
+      afterRevision:checked.afterRevision,
+      waitMs:checked.waitMs,
+    },{signal:controller.signal}) as Promise<ControlResult<InspectControlValue>>;
+    this.#activeWait=pending;
+    const cleanup=()=>{
+      options?.signal?.removeEventListener("abort",abort);
+      if(this.#activeWait===pending){this.#activeWait=undefined;this.#waitAbort=undefined;}
+    };
+    void pending.then(cleanup,cleanup);
+    return pending;
+  }
   stopStream(input: Readonly<{ streamId: string; expectedRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<StopStreamResult> { return this.call("/v1/stream/stop", { controlVersion: CONTROL_VERSION, target: this.#target, streamId: input.streamId, expectedRevision: input.expectedRevision ?? null }, options) as Promise<StopStreamResult>; }
-  async close(): Promise<void> { this.#closed = true; this.#bearer = ""; this.#agent.destroy(); }
+  async close(): Promise<void> {
+    if(this.#closed){await this.#activeWait;return;}
+    this.#closed=true;
+    this.#waitAbort?.abort();
+    await this.#activeWait;
+    this.#bearer="";
+    this.#agent.destroy();
+  }
   async call(path: Route, value: unknown, options?: Readonly<{ signal?: AbortSignal }>, owner = false): Promise<unknown> {
     if (this.#closed) return fail("runtime-exited");
     if (options?.signal?.aborted) return fail("request-cancelled");
-    const body = encodeCanonicalControlJson(value);
+    const body = encodeCanonicalControlJson(value),waitBudget=path==="/v1/stream/wait"&&ordinary(value)&&Number.isSafeInteger(value.waitMs)&&(value.waitMs as number)>=0&&(value.waitMs as number)<=30_000?(value.waitMs as number)+CONTROL_DEADLINES.request:CONTROL_DEADLINES.request;
     return new Promise((resolve) => {
       let settled = false, applied = false, responseStarted = false, connectTimer: ArmedDeadline | undefined, totalTimer: ArmedDeadline | undefined;
       let request!: ReturnType<typeof httpRequest>, abort: () => void = () => undefined;
       const finish = (result: unknown): void => { if (settled) return; settled = true; totalTimer?.clear();connectTimer?.clear();options?.signal?.removeEventListener("abort", abort); resolve(result); };
-      abort = (): void => { request.destroy(); finish(fail(applied ? "deadline-exceeded" : "request-cancelled")); };
+      abort = (): void => { request.destroy(); finish(fail(path==="/v1/stream/wait"||!applied ? "request-cancelled" : "deadline-exceeded")); };
       request = httpRequest({ host: "127.0.0.1", port: this.#port, path, method: "POST", agent: this.#agent, headers: { Host: `127.0.0.1:${this.#port}`, Authorization: `${owner ? "FSQ-Owner" : "FSQ-Control"} ${this.#bearer}`, "Content-Type": "application/json; charset=utf-8", "Content-Length": String(body.byteLength) } }, (response) => {
         responseStarted = true; applied = true; connectTimer?.clear();
-        void collect(response,this.#timer).then((bytes) => { try { finish(decodeRouteResponse(path,response,bytes)); } catch { finish(fail(path === "/v1/control/hello" ? "local-state-recovery-required" : "runtime-exited")); } }, () => finish(fail(path === "/v1/control/hello" ? "local-state-recovery-required" : "runtime-exited")));
+        void collect(response,this.#timer).then((bytes) => { try { finish(decodeRouteResponse(path,response,bytes)); } catch { finish(fail(path === "/v1/control/hello" ? "local-state-recovery-required" : "runtime-exited")); } }, () => finish(fail(path === "/v1/control/hello" ? "local-state-recovery-required" : path==="/v1/stream/wait"?"deadline-exceeded":"runtime-exited")));
       });
-      request.on("socket", (socket) => { const connected=()=>{connectTimer?.clear();if(!totalTimer)totalTimer=armControlDeadline(this.#timer,CONTROL_DEADLINES.request,()=>{request.destroy();finish(fail("deadline-exceeded"));});};if(!socket.connecting){connected();return;}connectTimer=armControlDeadline(this.#timer,CONTROL_DEADLINES.connect,()=>{request.destroy();finish(fail("deadline-exceeded"));});socket.once("connect",connected); });
-      request.on("error", (cause: NodeJS.ErrnoException) => { if (responseStarted) return; if(cause.code?.startsWith("HPE_")){finish(fail(path==="/v1/control/hello"?"local-state-recovery-required":"runtime-exited"));return;}if(applied&&MUTATING_ROUTES.has(path)){finish(fail("deadline-exceeded"));return;}finish(fail(path === "/v1/control/hello" && cause.code === "ECONNREFUSED" ? "instance-not-found" : "runtime-exited")); });
-      request.end(body, () => { applied = true; });
+      request.on("socket", (socket) => { const connected=()=>{if(settled)return;connectTimer?.clear();if(!totalTimer)totalTimer=armControlDeadline(this.#timer,waitBudget,()=>{request.destroy();finish(fail("deadline-exceeded"));});};if(!socket.connecting){connected();return;}connectTimer=armControlDeadline(this.#timer,CONTROL_DEADLINES.connect,()=>{request.destroy();finish(fail("deadline-exceeded"));});socket.once("connect",connected); });
+      request.on("error", (cause: NodeJS.ErrnoException) => { if (responseStarted) return; if(cause.code?.startsWith("HPE_")){finish(fail(path==="/v1/control/hello"?"local-state-recovery-required":"runtime-exited"));return;}if(applied&&(MUTATING_ROUTES.has(path)||path==="/v1/stream/wait")){finish(fail("deadline-exceeded"));return;}finish(fail(path === "/v1/control/hello" && cause.code === "ECONNREFUSED" ? "instance-not-found" : "runtime-exited")); });
+      options?.signal?.addEventListener("abort",abort,{once:true});if(options?.signal?.aborted){abort();return;}request.end(body, () => { applied = true; });
     });
   }
 }

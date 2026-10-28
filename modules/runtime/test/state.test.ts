@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"; import test from "node:test";
 import { DEVICE, KEY, ensured, fixture } from "./support/runtime-fixtures.js";
 import { StateStore } from "../src/state.js";
+const flush=():Promise<void>=>new Promise(resolve=>setImmediate(resolve));
+async function waitForWaiters(state:StateStore,count:number):Promise<void>{for(let turn=0;turn<20;turn++){if(state.activeWaitCount()===count)return;await flush();}assert.equal(state.activeWaitCount(),count);}
 test("control v2 idempotency binds every identity field and rejects legacy/provider input", async () => {
   const f = fixture(), deviceRef = { ...DEVICE, platform: "ios" as const, namespace: "fsq.devices" };
   const first = await f.state.ensureStandaloneViewer({ deviceRef, idempotencyKey: KEY });
@@ -30,3 +32,147 @@ test("terminal failure ledger retains at most 64 fixed records", async () => { c
 test("completed terminal flights do not accumulate across StateStore purge", async () => { const f=fixture(); let previous:Promise<unknown>|undefined; for (let i=0;i<70;i++) { const made=await f.auth.ensureStandaloneViewer({deviceRef:DEVICE,idempotencyKey:KEY}); assert.ok(made.ok); if (!made.ok) return; const streamId=made.value.snapshot.streamId, flight=f.state.terminal.request(streamId,"explicit-stop"); if (previous) assert.notEqual(flight,previous); await flight; assert.equal(f.state.terminal.activeFlightCount(),0); const repeated=f.state.terminal.request(streamId,"lease-expired"); assert.notEqual(repeated,flight); assert.equal((await repeated).reason,"explicit-stop"); assert.equal(f.state.terminal.activeFlightCount(),0); previous=repeated; f.clock.tick(600_000); } });
 test("failed terminal flight is released", async () => { const f=fixture(); await assert.rejects(f.state.terminal.request("32345678-1234-4234-8234-123456789abc","explicit-stop")); assert.equal(f.state.terminal.activeFlightCount(),0); });
 test("media transition validates metadata and ordinary plus terminal revisions preserve it",async()=>{const f=await ensured(),id=f.snapshot.streamId;assert.equal(f.snapshot.epoch,undefined);assert.throws(()=>f.state.transitionMediaLocked(id,"syncing",1,{epoch:0,codedSize:{width:1280,height:720},displaySize:{width:1280,height:720}}),/Invalid media state/);assert.throws(()=>f.state.transitionMediaLocked(id,"syncing",1,{epoch:1,codedSize:{width:0,height:720},displaySize:{width:1280,height:720}}),/Invalid media state/);assert.throws(()=>f.state.transitionMediaLocked(id,"syncing",1,{epoch:1,codedSize:{width:1280,height:720},displaySize:{width:1280,height:720},extra:true}),/Invalid media state/);const syncing=f.state.transitionMediaLocked(id,"syncing",1,{epoch:1,codedSize:{width:1280,height:720},displaySize:{width:720,height:1280}});assert.deepEqual({epoch:syncing.epoch,codedSize:syncing.codedSize,displaySize:syncing.displaySize},{epoch:1,codedSize:{width:1280,height:720},displaySize:{width:720,height:1280}});assert.ok(Object.isFrozen(syncing.codedSize));const streaming=f.state.transitionLocked(id,"streaming",1),grace=f.state.transitionLocked(id,"grace",0);for(const snapshot of [streaming,grace])assert.deepEqual([snapshot.epoch,snapshot.codedSize,snapshot.displaySize],[1,{width:1280,height:720},{width:720,height:1280}]);const terminal=await f.state.terminal.request(id,"explicit-stop");assert.deepEqual([terminal.phase,terminal.epoch,terminal.codedSize,terminal.displaySize],["stopped",1,{width:1280,height:720},{width:720,height:1280}]);});
+
+test("wait registration and first publication are atomic with a frozen first result",async()=>{
+  const f=await ensured(),id=f.snapshot.streamId;
+  const waiting=f.state.wait({streamId:id,afterRevision:1,waitMs:30_000});
+  await waitForWaiters(f.state,1);
+  await f.state.mutex.run(()=>{
+    f.state.transitionLocked(id,"starting-capture",1);
+    f.state.transitionLocked(id,"syncing",1);
+  });
+  const result=await waiting;
+  assert.ok(result.ok);
+  if(!result.ok)return;
+  assert.equal(result.value.snapshot.revision,2);
+  assert.deepEqual(result.value.changes.map(change=>change.revision),[2]);
+  assert.equal(result.value.timedOut,false);
+  assert.ok(Object.isFrozen(result.value));
+  assert.equal(f.state.activeWaitCount(),0);
+});
+
+test("wait immediately serves retained history reset future zero-timeout and terminal precedence",async()=>{
+  const f=await ensured(),id=f.snapshot.streamId;
+  for(let index=0;index<70;index++)f.state.transitionLocked(id,index%2===0?"grace":"demand-pending",0);
+  const retained=await f.state.wait({streamId:id,afterRevision:70,waitMs:30_000});
+  assert.ok(retained.ok);
+  if(retained.ok){assert.deepEqual(retained.value.changes.map(change=>change.revision),[71]);assert.equal(retained.value.reset,false);assert.equal(retained.value.timedOut,false);}
+  const reset=await f.state.wait({streamId:id,afterRevision:1,waitMs:30_000});
+  assert.ok(reset.ok);
+  if(reset.ok)assert.deepEqual({changes:reset.value.changes,reset:reset.value.reset,timedOut:reset.value.timedOut},{changes:[],reset:true,timedOut:false});
+  const future=await f.state.wait({streamId:id,afterRevision:999,waitMs:30_000});
+  assert.equal(future.ok?"":future.error.code,"malformed-control");
+  const timeout=await f.state.wait({streamId:id,afterRevision:71,waitMs:0});
+  assert.ok(timeout.ok);
+  if(timeout.ok)assert.deepEqual({changes:timeout.value.changes,reset:timeout.value.reset,timedOut:timeout.value.timedOut},{changes:[],reset:false,timedOut:true});
+  const terminal=await f.state.stop({streamId:id,reason:"explicit-stop"});
+  assert.ok(terminal.ok);
+  if(!terminal.ok)return;
+  const completed=await f.state.wait({streamId:id,afterRevision:terminal.value.snapshot.revision,waitMs:0});
+  assert.ok(completed.ok);
+  if(completed.ok)assert.equal(completed.value.timedOut,false);
+  assert.equal(f.state.activeWaitCount(),0);
+});
+
+test("wait uses one monotonic deadline and rearms an early timer",async()=>{
+  const early=await ensured(),id=early.snapshot.streamId,pending=early.state.wait({streamId:id,afterRevision:1,waitMs:30_000});
+  await waitForWaiters(early.state,1);
+  early.clock.jumpWall(86_400_000);
+  early.clock.fireNextTimerEarly();
+  await flush();
+  assert.equal(early.clock.mono(),39_999);
+  assert.equal(early.state.activeWaitCount(),1);
+  early.clock.tick(1);
+  await flush();
+  const timed=await pending;
+  assert.ok(timed.ok);
+  if(timed.ok)assert.equal(timed.value.timedOut,true);
+  assert.equal(early.state.activeWaitCount(),0);
+
+  for(const elapsed of [29_999,30_000]){
+    const f=await ensured(),wait=f.state.wait({streamId:f.snapshot.streamId,afterRevision:1,waitMs:30_000});
+    await waitForWaiters(f.state,1);
+    f.clock.advanceWithoutTimers(elapsed);
+    if(elapsed===29_999){f.state.transitionLocked(f.snapshot.streamId,"grace",0);const changed=await wait;assert.ok(changed.ok&&changed.value.timedOut===false);}
+    else{f.state.transitionLocked(f.snapshot.streamId,"grace",0);const exact=await wait;assert.ok(exact.ok&&exact.value.timedOut===true);if(exact.ok)assert.deepEqual([exact.value.snapshot.revision,exact.value.snapshot.phase],[1,"demand-pending"]);}
+    assert.equal(f.state.activeWaitCount(),0);
+  }
+});
+
+test("wait wakes separately for stopping and final terminal publications",async()=>{
+  const f=await ensured(),id=f.snapshot.streamId;
+  let release!:()=>void;
+  const gate=new Promise<void>(resolve=>{release=resolve;});
+  f.state.terminal.register(20,"wait-terminal-gate",()=>gate);
+  const stoppingWait=f.state.wait({streamId:id,afterRevision:1,waitMs:30_000});
+  await waitForWaiters(f.state,1);
+  const terminal=f.state.terminal.request(id,"explicit-stop");
+  const stopping=await stoppingWait;
+  assert.ok(stopping.ok);
+  if(!stopping.ok)return;
+  assert.equal(stopping.value.snapshot.phase,"stopping");
+  const finalWait=f.state.wait({streamId:id,afterRevision:stopping.value.snapshot.revision,waitMs:30_000});
+  await waitForWaiters(f.state,1);
+  release();
+  const [finalSnapshot,final]=await Promise.all([terminal,finalWait]);
+  assert.ok(final.ok);
+  if(final.ok){assert.equal(final.value.snapshot,finalSnapshot);assert.equal(final.value.snapshot.phase,"stopped");assert.equal(final.value.timedOut,false);}
+  assert.equal(f.state.activeWaitCount(),0);
+});
+
+test("StateStore enforces four waits before any fifth allocation and releases every cancellation",async()=>{
+  const f=await ensured(),controllers=Array.from({length:4},()=>new AbortController());
+  const waits=controllers.map(controller=>f.state.wait({streamId:f.snapshot.streamId,afterRevision:1,waitMs:30_000},controller.signal));
+  await waitForWaiters(f.state,4);
+  const fifth=await f.state.wait({streamId:f.snapshot.streamId,afterRevision:1,waitMs:30_000});
+  assert.equal(fifth.ok?"":fifth.error.code,"runtime-overload");
+  assert.equal(f.state.activeWaitCount(),4);
+  for(const controller of controllers)controller.abort();
+  const settled=await Promise.allSettled(waits);
+  assert.ok(settled.every(result=>result.status==="rejected"&&result.reason instanceof Error&&result.reason.name==="MutationCancelled"));
+  assert.equal(f.state.activeWaitCount(),0);
+});
+
+test("cancel publication and exact deadline races have one mutex-ordered winner",async()=>{
+  const cancelled=await ensured(),cancelController=new AbortController(),cancelWait=cancelled.state.wait({streamId:cancelled.snapshot.streamId,afterRevision:1,waitMs:100},cancelController.signal);
+  await waitForWaiters(cancelled.state,1);
+  cancelController.abort();
+  await cancelled.state.mutex.run(()=>cancelled.state.transitionLocked(cancelled.snapshot.streamId,"grace",0));
+  await assert.rejects(cancelWait,{name:"MutationCancelled"});
+  assert.equal(cancelled.state.activeWaitCount(),0);
+
+  const published=await ensured(),publishController=new AbortController(),publishWait=published.state.wait({streamId:published.snapshot.streamId,afterRevision:1,waitMs:100},publishController.signal);
+  await waitForWaiters(published.state,1);
+  await published.state.mutex.run(()=>published.state.transitionLocked(published.snapshot.streamId,"grace",0));
+  publishController.abort();
+  const changed=await publishWait;
+  assert.ok(changed.ok&&changed.value.timedOut===false);
+  assert.equal(published.state.activeWaitCount(),0);
+
+  const deadline=await ensured(),deadlineController=new AbortController(),deadlineWait=deadline.state.wait({streamId:deadline.snapshot.streamId,afterRevision:1,waitMs:100},deadlineController.signal);
+  await waitForWaiters(deadline.state,1);
+  deadline.clock.advanceWithoutTimers(100);
+  deadlineController.abort();
+  const exact=await deadlineWait;
+  assert.ok(exact.ok&&exact.value.timedOut===true);
+  assert.equal(deadline.state.activeWaitCount(),0);
+});
+
+test("reconnect wait uses only the shared history cursor and validates exact input",async()=>{
+  const f=await ensured(),id=f.snapshot.streamId;
+  f.state.transitionLocked(id,"starting-capture",1);
+  f.state.transitionLocked(id,"syncing",1);
+  const reconnected=await f.state.wait({streamId:id,afterRevision:1,waitMs:30_000});
+  assert.ok(reconnected.ok);
+  if(reconnected.ok)assert.deepEqual(reconnected.value.changes.map(change=>change.revision),[2,3]);
+  for(const input of [
+    {streamId:id,afterRevision:1,waitMs:-0},
+    {streamId:id,afterRevision:1,waitMs:30_001},
+    {streamId:id,afterRevision:1,waitMs:1,extra:true},
+    {streamId:id,afterRevision:1.5,waitMs:1},
+  ]){
+    const rejected=await f.state.wait(input);
+    assert.equal(rejected.ok?"":rejected.error.code,"malformed-control");
+  }
+  assert.equal(f.state.activeWaitCount(),0);
+});

@@ -49,7 +49,7 @@ function generation(slot: AndroidRuntimeSlot): RuntimeGenerationState {
   return Object.freeze({ runtimeStateVersion: 1, deviceRef: slot.deviceRef, instanceId: randomUUID(), generation: randomUUID(), port: slot.control.port, createdAt: NOW + 1, ready: true });
 }
 function live(slot: AndroidRuntimeSlot, target: RuntimeTarget) {
-  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze([]) as readonly [] }) }) });
+  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1"] as const) }) }) });
 }
 function stopped(slot: AndroidRuntimeSlot, streamId: string = randomUUID()): StreamSnapshot {
   return Object.freeze({ streamId, deviceRef: slot.deviceRef, revision: 2, phase: "stopped" as const, reason: "explicit-stop" as const, activeViewerCount: 0 as const, updatedAt: NOW + 2 });

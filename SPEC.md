@@ -111,14 +111,14 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 
 ## macOS Android RuntimeControl v1
 
-本节覆盖已确认的 `ANDROID-RUNTIME-CONTROL-MACOS-02`；CLI、wait/watch、Windows、iOS RuntimeControl 与 Model Context Protocol 均不由本节预建。
+本节最初定义 `ANDROID-RUNTIME-CONTROL-MACOS-02`；下方已确认的`ANDROID-CONTROL-WAIT-MACOS-04`只扩展ordinary provider wait。CLI wait/watch、Windows、iOS RuntimeControl与Model Context Protocol仍未启用。
 
 - 平台组合为本地macOS arm64、`ANDROID-AUTO-BINDING-MACOS-01`已验收的恰好一台USB Android设备、一个persistent Runtime/stream/Viewer。Runtime客户端退出不停止Runtime；只有持有独立owner authority且显式请求shutdown才停止进程。
 - 新增独立于Viewer origin、绑定exact `127.0.0.1`的HTTP/1.1 JSON control listener，以及一个深的provider-neutral RuntimeControl client/provider seam；control面不传媒体、不接触Capture/Viewer内部对象。
 - `selector:auto/android`通过Capture owner-private resolver原子生成或复用安全DeviceRef和私有本机状态；`selector:known`只连接既有identity。并发首次启动只有一个crash-durable persistent slot、一个control listener和一个Runtime generation成为authority。
-- stable root credential只存在owner-private slot；Runtime以HMAC-SHA-256派生不可互换的client与owner bearer。普通attached session只有ensure/inspect/stop authority；approve pairing与Runtime shutdown必须使用独立owner authority。
+- stable root credential只存在owner-private slot；Runtime以HMAC-SHA-256派生不可互换的client与owner bearer。普通attached session只有ensure/inspect/wait/stop authority；approve pairing与Runtime shutdown必须使用独立owner authority。
 - Agent-safe结果只含Contracts-owned control值、`ViewerDescriptor`与`StreamSnapshot`；Android serial、路径、artifact locator、root/client/owner credential、ViewerGrant、pairingId、PID和原异常不进入普通结果、日志、URL、模型上下文或遥测。
-- 本feature支持acquire/start-or-attach、ensure、inspect、stop stream、owner pairing approval和owner Runtime shutdown；不支持wait/watch、state维护命令、远程、多个设备/流/Viewer或Model Context Protocol。
+- 当前支持acquire/start-or-attach、ensure、inspect、bounded wait、stop stream、owner pairing approval和owner Runtime shutdown；不支持CLI wait/watch、远程、多个设备/流/Viewer或Model Context Protocol。
 - Contracts/Runtime同名契约固定wire schema、canonical bytes、认证顺序、semantic ensure key/grant生命周期、错误tuple/deadline、crash-durable filesystem状态、spawn/bind/ready/attach与ABA规则。Capture/Viewer行为no-delta。
 
 ## macOS Android CLI v1
@@ -131,3 +131,13 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - 现设计中“Runtime interface unchanged”仅适用于HTTP wire与ordinary RuntimeControl；owner recovery使用Runtime同名narrow owner-local maintenance seam，禁止CLI直接读取私有文件或取得serial/path/port/credential/binding。
 - 普通client退出不停止stream/Runtime；stream stop保持Runtime监听；仅显式owner shutdown停止Runtime。所有输出沿用safe DTO，媒体与provider/authority私有值禁止进入stdout、stderr、prompt、argv、日志或模型上下文。
 - Exact command/result/confirmation/packaging/privacy与真实验收由 [Integrations SPEC](modules/integrations/SPEC.md) 定义；Runtime slot replacement、并发、crash/cancel/ABA由Runtime同名delta定义。
+
+## macOS Android RuntimeControl Bounded Wait
+
+本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` SPEC delta；它只替换上文“wait不支持”的部分，不启用CLI wait/watch。
+
+- 平台组合仍为本地macOS arm64、恰好一台USB Android及一个persistent Runtime/stream；新增provider-neutral bounded long-poll `wait`，调用方按revision恢复，不保存server-side cursor或per-client history。
+- Feature成功后ordinary client支持`wait`；`fsq-scrcpy stream wait/watch`仍属于后续`ANDROID-CLI-WATCH-MACOS-04B`。Capture/Viewer no-delta；Integrations不新增命令、解析或wait/watch行为，但既有viewer ensure/stream inspect必须透传新的Contracts exact值。
+- Contracts clean cutover把`RuntimeInstance.features`固定为`["wait-v1"]`，扩展同一个observation value并新增第七条client-authority route；不升ControlVersion、不新增error/dependency/媒体或支持矩阵声明。
+- Runtime用既有StateStore mutex/history/monotonic Clock实现原子注册、change/terminal/timeout/cancel线性化；最多8 authenticated connections/in-flight、4 concurrent waits、每local client及socket一个wait，所有完成路径恰好一次释放listener/timer/admission。
+- Exact值、canonical bytes、caps、deadline、close/cancel与验收由Contracts/Runtime同名delta定义；通过temporary control client证明provider，不新增CLI命令。

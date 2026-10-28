@@ -1,7 +1,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { createViewerAccess, revealViewerGrant, validateDeviceRef, validateSize, validateStreamId, type DeviceRef, type Size, type SnapshotReason, type StreamError, type StreamErrorCode, type StreamPhase, type StreamSnapshot, type ViewerAccess, type ViewerGrant } from "../../contracts/src/index.js";
 import type { Clock, Entropy } from "./clock.js"; import { Mutex } from "./clock.js";
-import type { EnsureResult, InspectResult, StopResult } from "./types.js"; import { freeze } from "./types.js";
+import type { EnsureResult, InspectResult, StopResult, WaitRequest } from "./types.js"; import { freeze } from "./types.js";
 const KEY = /^[A-Za-z0-9_-]{22,128}$/;
 const validKey = (value: string): boolean => KEY.test(value) && value.length % 4 !== 1 && Buffer.from(value, "base64url").toString("base64url") === value;
 const messages: Partial<Record<StreamErrorCode, string>> = { "malformed-control": "The request is invalid.", "runtime-bind-failed": "The local service could not start.", "runtime-overload": "The local service is at capacity.", unauthorized: "Authorization failed." };
@@ -15,6 +15,17 @@ export interface TerminalContext { readonly streamId: string; readonly reason: S
 export type TerminalParticipant = (context: TerminalContext) => void | Promise<void>;
 export interface TerminalFailure { readonly participant: string; readonly code: "cleanup-failed" }
 interface Flight { readonly promise: Promise<StreamSnapshot>; readonly resolve: (snapshot: StreamSnapshot) => void; readonly reject: (reason: unknown) => void; readonly reason: SnapshotReason }
+interface Waiter {
+  readonly record:RecordState;
+  readonly afterRevision:number;
+  readonly deadline:number;
+  readonly signal?:AbortSignal;
+  readonly resolve:(result:InspectResult)=>void;
+  readonly reject:(reason:unknown)=>void;
+  abort:()=>void;
+  timer?:object;
+  active:boolean;
+}
 export class MutationCancelled extends Error { constructor() { super("Control mutation cancelled"); this.name = "MutationCancelled"; } }
 export class TerminalCoordinator {
   #participants: { order:number; name:string; run:TerminalParticipant }[]=[]; #flights=new Map<string,Flight>(); #failures:TerminalFailure[]=[];
@@ -28,12 +39,42 @@ export class TerminalCoordinator {
   async #run(streamId: string, flight: Flight): Promise<void> { try { const begun=await this.state.mutex.run(()=>this.state.beginTerminal(streamId)); if (begun.done) { flight.resolve(begun.snapshot); return; } const context=freeze({streamId,reason:flight.reason,stopping:begun.snapshot}); for (const participant of this.#participants) { try { await participant.run(context); } catch { if (this.#failures.length===64) this.#failures.shift(); this.#failures.push(freeze({participant:participant.name,code:"cleanup-failed"})); } } flight.resolve(await this.state.mutex.run(()=>this.state.finishTerminal(streamId,flight.reason))); } catch (cause) { flight.reject(cause); } finally { if (this.#flights.get(streamId)===flight) this.#flights.delete(streamId); } }
 }
 export class StateStore {
-  readonly mutex: Mutex; readonly terminal: TerminalCoordinator; #records = new Map<string, RecordState>(); #current: RecordState | undefined; #hmac: Buffer;
+  readonly mutex: Mutex; readonly terminal: TerminalCoordinator; #records = new Map<string, RecordState>(); #current: RecordState | undefined; #hmac: Buffer; #waiters=new Set<Waiter>();
   constructor(readonly port: number, readonly clock: Clock, readonly entropy: Entropy, mutex = new Mutex()) { this.mutex = mutex; this.terminal = new TerminalCoordinator(this); this.#hmac = Buffer.from(entropy.bytes(32)); }
   ensureStandaloneViewer(value: unknown): Promise<EnsureResult> { return this.mutex.run(()=>this.ensureLocked(value)); }
   runControl<T>(signal:AbortSignal|undefined,operation:()=>T|Promise<T>):Promise<T>{return this.mutex.run(()=>{if(signal?.aborted)throw new MutationCancelled();return operation();});}
   ensureLocked(value: unknown): EnsureResult { if (!exact(value,["deviceRef","idempotencyKey"]) || typeof value.idempotencyKey !== "string" || !validKey(value.idempotencyKey)) return freeze({ok:false,error:error("malformed-control")}); if (this.port<1 || this.port>65535) return freeze({ok:false,error:error("runtime-bind-failed")}); let device:DeviceRef; try { device=freeze({...validateDeviceRef(value.deviceRef)}); } catch { return freeze({ok:false,error:error("malformed-control")}); } const mono=this.clock.mono(); this.#purge(mono); const input=canonical(device), prior=this.#records.get(value.idempotencyKey); if (prior) { if (!prior.input.equals(input)) return freeze({ok:false,error:error("malformed-control")}); if (mono>=prior.grantDeadline || !prior.access) { prior.access=undefined; return freeze({ok:false,error:error("unauthorized")}); } return freeze({ok:true,value:freeze({access:prior.access,snapshot:prior.initial})}); } if (this.#current && this.#current.terminalMono===undefined) return freeze({ok:false,error:error("malformed-control")}); if (this.#records.size>=64) return freeze({ok:false,error:error("runtime-overload")}); const streamId=uuid(this.entropy), rawBytes=this.entropy.bytes(32), raw=Buffer.from(rawBytes).toString("base64url"), expiresAt=this.clock.wall()+60_000, grantDeadline=mono+60_000, access=createViewerAccess({contractVersion:2,streamId,standaloneUri:`http://127.0.0.1:${this.port}/viewer/${streamId}`,presentationModes:["standalone"],expiresAt},raw); rawBytes.fill(0); const snapshot=this.make(streamId,device,1,"demand-pending",0), record:RecordState={key:value.idempotencyKey,input,createdMono:mono,grantDeadline,grantDigest:this.digest(raw,`viewer-owner:${streamId}:${grantDeadline}`),access,initial:snapshot,snapshot,history:[snapshot],terminalMono:undefined,fenced:false}; this.#records.set(record.key,record); this.#current=record; return freeze({ok:true,value:freeze({access,snapshot})}); }
-  inspect(value: unknown): InspectResult { const afterKey = typeof value === "object" && value !== null && Object.hasOwn(value, "afterRevision"); if (!exact(value, afterKey ? ["streamId", "afterRevision"] : ["streamId"])) return freeze({ ok: false, error: error("malformed-control") }); try { validateStreamId(value.streamId); } catch { return freeze({ ok: false, error: error("malformed-control") }); } const record = this.#find(value.streamId); if (!record || (afterKey && (!Number.isSafeInteger(value.afterRevision) || (value.afterRevision as number) < 1 || (value.afterRevision as number) > record.snapshot.revision))) return freeze({ ok: false, error: error("malformed-control") }); const after = value.afterRevision as number | undefined; if (after === undefined || after === record.snapshot.revision) return freeze({ ok: true, value: freeze({ snapshot: record.snapshot, changes: freeze([] as StreamSnapshot[]), reset: false }) }); const first = record.history[0]!.revision; return freeze({ ok: true, value: freeze({ snapshot: record.snapshot, changes: after < first - 1 ? freeze([] as StreamSnapshot[]) : freeze(record.history.filter((s) => s.revision > after)), reset: after < first - 1 }) }); }
+  inspect(value: unknown): InspectResult { const afterKey=typeof value==="object"&&value!==null&&Object.hasOwn(value,"afterRevision"); if(!exact(value,afterKey?["streamId","afterRevision"]:["streamId"]))return freeze({ok:false,error:error("malformed-control")});try{validateStreamId(value.streamId);}catch{return freeze({ok:false,error:error("malformed-control")});}const record=this.#find(value.streamId);if(!record||(afterKey&&(!Number.isSafeInteger(value.afterRevision)||(value.afterRevision as number)<1||(value.afterRevision as number)>record.snapshot.revision)))return freeze({ok:false,error:error("malformed-control")});return this.#observe(record,value.afterRevision as number|undefined); }
+  async wait(value:unknown,signal?:AbortSignal):Promise<InspectResult>{
+    let pending:Promise<InspectResult>|undefined;
+    const immediate=await this.mutex.run<InspectResult|undefined>(()=>{
+      if(!exact(value,["streamId","afterRevision","waitMs"])||
+        !Number.isSafeInteger(value.afterRevision)||(value.afterRevision as number)<1||
+        !Number.isSafeInteger(value.waitMs)||(value.waitMs as number)<0||
+        (value.waitMs as number)>30_000||Object.is(value.waitMs,-0))
+        return freeze({ok:false,error:error("malformed-control")});
+      try{validateStreamId(value.streamId);}catch{return freeze({ok:false,error:error("malformed-control")});}
+      const input=value as unknown as WaitRequest,record=this.#find(input.streamId);
+      if(!record||input.afterRevision>record.snapshot.revision)return freeze({ok:false,error:error("malformed-control")});
+      if(signal?.aborted)throw new MutationCancelled();
+      if(input.afterRevision<record.snapshot.revision||record.terminalMono!==undefined)return this.#observe(record,input.afterRevision);
+      if(input.waitMs===0)return this.#timeout(record);
+      if(this.#waiters.size>=4)return freeze({ok:false,error:error("runtime-overload")});
+      pending=new Promise<InspectResult>((resolve,reject)=>{
+        const waiter:Waiter={record,afterRevision:input.afterRevision,deadline:this.clock.mono()+input.waitMs,...(signal?{signal}:{}),resolve,reject,abort:()=>{},active:true};
+        waiter.abort=()=>{void this.mutex.run(()=>this.#cancel(waiter));};
+        waiter.timer=this.clock.set(input.waitMs,()=>{
+          delete waiter.timer;
+          void this.mutex.run(()=>this.#expire(waiter));
+        });
+        signal?.addEventListener("abort",waiter.abort,{once:true});
+        this.#waiters.add(waiter);
+      });
+      return undefined;
+    });
+    return immediate??pending!;
+  }
+  activeWaitCount():number{return this.#waiters.size;}
   async stop(value: unknown, signal?: AbortSignal): Promise<StopResult> { const revisionKey = typeof value === "object" && value !== null && Object.hasOwn(value, "expectedRevision"); if (!exact(value, revisionKey ? ["streamId", "expectedRevision", "reason"] : ["streamId", "reason"]) || value.reason !== "explicit-stop") return freeze({ ok: false, error: error("malformed-control") }); let terminal: Promise<StreamSnapshot> | undefined; const immediate = await this.runControl<StopResult | undefined>(signal,() => { const record = this.#find(value.streamId); if (!record) return freeze({ ok: false, error: error("malformed-control") }); if (record.terminalMono !== undefined) return freeze({ ok: true, value: freeze({ snapshot: record.snapshot }) }); if (revisionKey && value.expectedRevision !== record.snapshot.revision) return freeze({ ok: false, error: error("malformed-control"), snapshot: record.snapshot }); terminal=this.terminal.request(record.snapshot.streamId,"explicit-stop"); return undefined; }); if (immediate) return immediate; return freeze({ok:true,value:freeze({snapshot:await terminal!})}); }
   transitionLocked(streamId: string, phase: StreamPhase, active: 0 | 1): StreamSnapshot { const r = this.#find(streamId); if (!r || r.terminalMono !== undefined || r.fenced) throw new TypeError("Invalid stream state"); return this.publish(r, phase, active, phase === "interrupted" ? "stream-interrupted" : undefined); }
   transitionMediaLocked(streamId:string,phase:StreamPhase,active:0|1,value:unknown):StreamSnapshot { if (!exact(value,["epoch","codedSize","displaySize"]) || !Number.isSafeInteger(value.epoch) || (value.epoch as number)<1) throw new TypeError("Invalid media state"); let codedSize:Size,displaySize:Size; try { codedSize=freeze({...validateSize(value.codedSize)}); displaySize=freeze({...validateSize(value.displaySize)}); } catch { throw new TypeError("Invalid media state"); } const r=this.#find(streamId); if (!r || r.terminalMono!==undefined || r.fenced) throw new TypeError("Invalid stream state"); return this.publish(r,phase,active,undefined,freeze({epoch:value.epoch as number,codedSize,displaySize})); }
@@ -46,5 +87,60 @@ export class StateStore {
   #find(streamId: unknown): RecordState | undefined { return typeof streamId === "string" ? [...this.#records.values()].find((r) => r.snapshot.streamId === streamId) : undefined; }
   private digest(raw: string, context: string): Buffer { return createHmac("sha256", this.#hmac).update(context).update("\0").update(raw).digest(); }
   private make(streamId:string,deviceRef:DeviceRef,revision:number,phase:StreamPhase,activeViewerCount:0|1,reason?:SnapshotReason,media?:MediaState|StreamSnapshot):StreamSnapshot { const epoch=media?.epoch,codedSize=media?.codedSize,displaySize=media?.displaySize; return freeze({streamId,deviceRef,revision,phase,...(reason===undefined?{}:{reason}),...(epoch===undefined?{}:{epoch}),...(codedSize===undefined?{}:{codedSize}),...(displaySize===undefined?{}:{displaySize}),activeViewerCount,updatedAt:this.clock.wall()}); }
-  private publish(r:RecordState,phase:StreamPhase,active:0|1,reason?:SnapshotReason,media:MediaState|StreamSnapshot=r.snapshot):StreamSnapshot { r.snapshot=this.make(r.snapshot.streamId,r.snapshot.deviceRef,r.snapshot.revision+1,phase,active,reason,media); r.history.push(r.snapshot); while (r.history.length>64 || Buffer.byteLength(JSON.stringify(r.history))>524_288) r.history.shift(); return r.snapshot; }
+  #observe(record:RecordState,after:number|undefined):InspectResult{
+    if(after===undefined||after===record.snapshot.revision)
+      return freeze({ok:true,value:freeze({snapshot:record.snapshot,changes:freeze([] as StreamSnapshot[]),reset:false,timedOut:false})});
+    const first=record.history[0]!.revision,reset=after<first-1;
+    return freeze({ok:true,value:freeze({snapshot:record.snapshot,changes:reset?freeze([] as StreamSnapshot[]):freeze(record.history.filter(snapshot=>snapshot.revision>after)),reset,timedOut:false})});
+  }
+  #timeout(record:RecordState):InspectResult{
+    return freeze({ok:true,value:freeze({snapshot:record.snapshot,changes:freeze([] as StreamSnapshot[]),reset:false,timedOut:true})});
+  }
+  #dispose(waiter:Waiter):boolean{
+    if(!waiter.active)return false;
+    waiter.active=false;
+    this.#waiters.delete(waiter);
+    if(waiter.timer!==undefined){this.clock.clear(waiter.timer);delete waiter.timer;}
+    waiter.signal?.removeEventListener("abort",waiter.abort);
+    return true;
+  }
+  #settle(waiter:Waiter,result:InspectResult):void{
+    if(this.#dispose(waiter))waiter.resolve(result);
+  }
+  #expire(waiter:Waiter):void{
+    if(!waiter.active)return;
+    const remaining=waiter.deadline-this.clock.mono();
+    if(remaining>0){
+      waiter.timer=this.clock.set(remaining,()=>{
+        delete waiter.timer;
+        void this.mutex.run(()=>this.#expire(waiter));
+      });
+      return;
+    }
+    this.#settle(waiter,this.#timeout(waiter.record));
+  }
+  #cancel(waiter:Waiter):void{
+    if(!waiter.active)return;
+    if(this.clock.mono()>=waiter.deadline){this.#settle(waiter,this.#timeout(waiter.record));return;}
+    if(this.#dispose(waiter))waiter.reject(new MutationCancelled());
+  }
+  #expireBeforePublication(record:RecordState):void{
+    const now=this.clock.mono();
+    for(const waiter of this.#waiters){
+      if(waiter.record===record&&now>=waiter.deadline)this.#settle(waiter,this.#timeout(record));
+    }
+  }
+  #wake(record:RecordState):void{
+    for(const waiter of this.#waiters){
+      if(waiter.record===record)this.#settle(waiter,this.#observe(record,waiter.afterRevision));
+    }
+  }
+  private publish(r:RecordState,phase:StreamPhase,active:0|1,reason?:SnapshotReason,media:MediaState|StreamSnapshot=r.snapshot):StreamSnapshot {
+    this.#expireBeforePublication(r);
+    r.snapshot=this.make(r.snapshot.streamId,r.snapshot.deviceRef,r.snapshot.revision+1,phase,active,reason,media);
+    r.history.push(r.snapshot);
+    while(r.history.length>64||Buffer.byteLength(JSON.stringify(r.history))>524_288)r.history.shift();
+    this.#wake(r);
+    return r.snapshot;
+  }
 }

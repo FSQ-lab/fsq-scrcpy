@@ -15,6 +15,7 @@ import {
   parseCanonicalControlJson,
   type ControlError,
   type RuntimeTarget,
+  type RuntimeControlSession,
 } from "../../contracts/src/index.js";
 import type { CaptureSession } from "../../capture/src/session.js";
 import type { CaptureSource } from "../../capture/src/index.js";
@@ -48,12 +49,12 @@ async function rawMutation(slot:AndroidRuntimeSlot,path:string,authority:"client
 function collectSocket(socket:Socket,timeoutMs=1_000):Promise<Readonly<{reply:string;reset:boolean}>>{return new Promise((resolve,reject)=>{const chunks:Buffer[]=[];let done=false;const cleanup=()=>{clearTimeout(timer);socket.off("data",data);socket.off("end",end);socket.off("close",close);socket.off("error",error);},finish=(reset:boolean)=>{if(done)return;done=true;cleanup();resolve({reply:Buffer.concat(chunks).toString(),reset});},data=(chunk:Uint8Array)=>chunks.push(Buffer.from(chunk)),end=()=>finish(false),close=()=>finish(true),error=(cause:NodeJS.ErrnoException)=>{if(cause.code==="ECONNRESET")finish(true);else{if(done)return;done=true;cleanup();reject(cause);}},timer=setTimeout(()=>{if(done)return;done=true;cleanup();socket.destroy();reject(new Error("socket fixture timeout"));},timeoutMs);socket.on("data",data);socket.once("end",end);socket.once("close",close);socket.once("error",error);});}
 function readOneResponse(socket:Socket,timeoutMs=1_000):Promise<string>{return new Promise((resolve,reject)=>{let data="",done=false;const cleanup=()=>{clearTimeout(timer);socket.off("data",onData);socket.off("error",onError);},onData=(chunk:Uint8Array)=>{data+=Buffer.from(chunk).toString();const split=data.indexOf("\r\n\r\n");if(split<0)return;const match=/\r\nContent-Length: ([0-9]+)\r\n/i.exec(data.slice(0,split+4));if(!match||Buffer.byteLength(data.slice(split+4))<Number(match[1]))return;done=true;cleanup();resolve(data);},onError=(cause:Error)=>{if(done)return;done=true;cleanup();reject(cause);},timer=setTimeout(()=>{if(done)return;done=true;cleanup();reject(new Error("response fixture timeout"));},timeoutMs);socket.on("data",onData);socket.once("error",onError);});}
 function agentCall(slot:AndroidRuntimeSlot,agent:Agent,value:unknown,authorization:string):Promise<Reply>{const body=encodeCanonicalControlJson(value);return new Promise((resolve,reject)=>{const request=nodeRequest({host:"127.0.0.1",port:slot.control.port,path:"/v1/control/hello",method:"POST",agent,headers:{Host:`127.0.0.1:${slot.control.port}`,Authorization:authorization,"Content-Type":"application/json; charset=utf-8","Content-Length":String(body.byteLength)}},response=>{const chunks:Buffer[]=[];response.on("data",chunk=>chunks.push(Buffer.from(chunk)));response.on("end",()=>resolve({status:response.statusCode??0,headers:response.headers,body:Buffer.concat(chunks)}));});request.on("error",reject);request.end(body);});}
-type ClientRoute="hello"|"ensure"|"inspect"|"stop"|"approve"|"shutdown";
-async function invokeClientRoute(route:ClientRoute,slot:AndroidRuntimeSlot,target:RuntimeTarget):Promise<unknown>{const instance={controlVersion:CONTROL_VERSION,instanceId:target.instanceId,generation:target.generation,contractVersion:2 as const,deviceRef:slot.deviceRef,features:Object.freeze([])as readonly []};if(route==="hello")return helloControl(slot,target);if(route==="approve"||route==="shutdown"){const owner=new OwnerHttpControl(slot.control.port,target,slot.control.credential);try{return route==="approve"?await owner.approveViewerPairing({streamId:randomUUID(),pairingCode:"ABCDEFGH"}):await owner.shutdownRuntime(target);}finally{await owner.close();}}const attached=await attachControlSession(slot.control.port,{disposition:"attached",instance},slot.control.credential);assert.ok(attached.ok);if(!attached.ok)return attached;try{if(route==="ensure")return await attached.session.control.ensureViewer();if(route==="inspect")return await attached.session.control.inspect({streamId:randomUUID()});return await attached.session.control.stopStream({streamId:randomUUID()});}finally{await attached.session.close();}}
+type ClientRoute="hello"|"ensure"|"inspect"|"wait"|"stop"|"approve"|"shutdown";
+async function invokeClientRoute(route:ClientRoute,slot:AndroidRuntimeSlot,target:RuntimeTarget):Promise<unknown>{const instance={controlVersion:CONTROL_VERSION,instanceId:target.instanceId,generation:target.generation,contractVersion:2 as const,deviceRef:slot.deviceRef,features:Object.freeze(["wait-v1"]as const)};if(route==="hello")return helloControl(slot,target);if(route==="approve"||route==="shutdown"){const owner=new OwnerHttpControl(slot.control.port,target,slot.control.credential);try{return route==="approve"?await owner.approveViewerPairing({streamId:randomUUID(),pairingCode:"ABCDEFGH"}):await owner.shutdownRuntime(target);}finally{await owner.close();}}const attached=await attachControlSession(slot.control.port,{disposition:"attached",instance},slot.control.credential);assert.ok(attached.ok);if(!attached.ok)return attached;try{if(route==="ensure")return await attached.session.control.ensureViewer();if(route==="inspect")return await attached.session.control.inspect({streamId:randomUUID()});if(route==="wait")return await attached.session.control.wait({streamId:randomUUID(),afterRevision:1,waitMs:0});return await attached.session.control.stopStream({streamId:randomUUID()});}finally{await attached.session.close();}}
 const decoded = <T>(value: Uint8Array): T => parseCanonicalControlJson(value) as T;
 class FakeControlTimer implements ControlTimer{now=0;#next=1;#timers=new Map<number,{at:number;callback:()=>void}>();mono(){return this.now;}set(delay:number,callback:()=>void):object{const id=this.#next++;this.#timers.set(id,{at:this.now+delay,callback});return{id};}clear(handle:object){this.#timers.delete((handle as{id:number}).id);}advance(ms:number){const end=this.now+ms;for(;;){const due=[...this.#timers].filter(([,timer])=>timer.at<=end).sort((left,right)=>left[1].at-right[1].at)[0];if(!due)break;this.now=due[1].at;this.#timers.delete(due[0]);due[1].callback();}this.now=end;}count(){return this.#timers.size;}}
 async function awaitTimerCount(timer:FakeControlTimer,expected:number):Promise<void>{for(let turn=0;turn<20;turn++){if(timer.count()===expected)return;await new Promise(resolve=>setImmediate(resolve));}assert.fail(`expected ${expected} registered timers, saw ${timer.count()}`);}
-async function awaitAdmission(host:RuntimeControlHost,expected:Readonly<{preauth:number;authenticated:number;inFlight:number}>):Promise<void>{for(let turn=0;turn<20;turn++){if(JSON.stringify(host.admissionSnapshot())===JSON.stringify(expected))return;await new Promise(resolve=>setImmediate(resolve));}assert.deepEqual(host.admissionSnapshot(),expected);}
+async function awaitAdmission(host:RuntimeControlHost,expected:Readonly<{preauth:number;authenticated:number;inFlight:number;waits?:number}>):Promise<void>{const complete={preauth:expected.preauth,authenticated:expected.authenticated,inFlight:expected.inFlight,waits:expected.waits??0};for(let turn=0;turn<20;turn++){if(JSON.stringify(host.admissionSnapshot())===JSON.stringify(complete))return;await new Promise(resolve=>setImmediate(resolve));}assert.deepEqual(host.admissionSnapshot(),complete);}
 async function awaitServerAbort(aborted:Promise<void>):Promise<void>{let timeout:NodeJS.Timeout|undefined;try{await Promise.race([aborted,new Promise<never>((_resolve,reject)=>{timeout=setTimeout(()=>reject(new Error("server cancellation signal timeout")),1_000);})]);}finally{if(timeout)clearTimeout(timeout);}}
 await test("control deadline ledger uses exact contract boundaries",()=>{assert.deepEqual(CONTROL_DEADLINES,{connect:1_000,request:5_000,readIdle:2_000,terminate:2_000,readiness:10_000});});
 
@@ -74,7 +75,7 @@ await test("authenticated hello returns only the exact ready Runtime identity", 
     const target = { instanceId: f.generation.instanceId, generation: f.generation.generation };
     const current = await helloControl(f.slot, target);
     assert.ok(current.ok); if (!current.ok) return;
-    assert.equal(current.value.instance.controlVersion.major, 1); assert.equal(current.value.instance.controlVersion.minor, 0); assert.equal(current.value.instance.instanceId, target.instanceId); assert.equal(current.value.instance.generation, target.generation); assert.equal(current.value.instance.contractVersion, 2); assert.equal(JSON.stringify(current.value.instance.deviceRef), JSON.stringify(f.slot.deviceRef)); assert.equal(current.value.instance.features.length, 0);
+    assert.equal(current.value.instance.controlVersion.major, 1); assert.equal(current.value.instance.controlVersion.minor, 0); assert.equal(current.value.instance.instanceId, target.instanceId); assert.equal(current.value.instance.generation, target.generation); assert.equal(current.value.instance.contractVersion, 2); assert.equal(JSON.stringify(current.value.instance.deviceRef), JSON.stringify(f.slot.deviceRef)); assert.deepEqual(current.value.instance.features, ["wait-v1"]);assert.ok(Object.isFrozen(current.value.instance.features));
     assert.deepEqual(Object.keys(current.value.instance), ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]);
     const missing = await helloControl(f.slot, null);
     assert.ok(missing.ok);
@@ -112,7 +113,7 @@ await test("ordinary session serialization excludes bearer and control object", 
     assert.equal(JSON.stringify(result.session.control), "{}");
     assert.equal(JSON.stringify(result.session).includes(f.slot.control.credential), false);
     assert.equal(JSON.stringify(result.session).includes(deriveControlBearer(f.slot.control.credential, "client")), false);
-    const serialized = JSON.stringify(result.session); for (const privateValue of ["ensureViewer", "inspect", "stopStream", "FSQ-Control", "FSQ-Owner", "credential", "viewerGrant", "ownerBearer"]) assert.equal(serialized.includes(privateValue), false);
+    const serialized = JSON.stringify(result.session); for (const privateValue of ["ensureViewer", "inspect", "\"wait\"", "stopStream", "FSQ-Control", "FSQ-Owner", "credential", "viewerGrant", "ownerBearer"]) assert.equal(serialized.includes(privateValue), false);
     await result.session.close();
   } finally { await f.close(); }
 });
@@ -270,7 +271,7 @@ await test("pre-aborted provider operations are not applied", async () => {
   try {
     const controller = new AbortController(); controller.abort();
     const provider = f.host.provider;
-    const target={instanceId:f.generation.instanceId,generation:f.generation.generation};for (const result of [await provider.ensureViewer({ signal: controller.signal }), provider.inspect({ streamId: randomUUID() }, { signal: controller.signal }), await provider.stopStream({ streamId: randomUUID() }, { signal: controller.signal }), await provider.approveViewerPairing({ streamId: randomUUID(), pairingCode: "ABCDEFGH" }, { signal: controller.signal }),await provider.shutdownRuntime(target,{signal:controller.signal})]) {
+    const target={instanceId:f.generation.instanceId,generation:f.generation.generation};for (const result of [await provider.ensureViewer({ signal: controller.signal }), provider.inspect({ streamId: randomUUID() }, { signal: controller.signal }),await provider.wait({streamId:randomUUID(),afterRevision:1,waitMs:0},{signal:controller.signal}), await provider.stopStream({ streamId: randomUUID() }, { signal: controller.signal }), await provider.approveViewerPairing({ streamId: randomUUID(), pairingCode: "ABCDEFGH" }, { signal: controller.signal }),await provider.shutdownRuntime(target,{signal:controller.signal})]) {
       assert.equal(result.ok ? "" : result.error.code, "request-cancelled");
       if (!result.ok) assert.equal(result.error.operationState, "not-applied");
     }
@@ -369,17 +370,35 @@ await test("client bearer is released from ordinary control enumeration and insp
   } finally { await f.close(); }
 });
 
-await test("seventeen provider changes reset atomically instead of slicing a prefix", async () => {
-  const f = await fixture();
-  try {
-    const ensured = await f.host.provider.ensureViewer(); assert.ok(ensured.ok); if (!ensured.ok) return;
-    const fakeService = {
-      inspect: () => ({ ok: true as const, value: { snapshot: ensured.value.snapshot, changes: Array.from({ length: 17 }, (_, index) => Object.freeze({ ...ensured.value.snapshot, revision: index + 1 })), reset: false } }),
-      ensureControlViewer: () => Promise.resolve({ ok: false as const, error: { code: "malformed-control" } }), stop: () => Promise.resolve({ ok: false as const, error: { code: "malformed-control" } }), approveControlPairing: () => Promise.resolve({ ok: false as const, error: { code: "unauthorized" } }), close: () => Promise.resolve(),
-    };
-    const provider = new RuntimeControlProvider(fakeService as never, f.slot, f.generation, async () => undefined); provider.markReady();
-    const inspected = provider.inspect({ streamId: ensured.value.snapshot.streamId }); assert.ok(inspected.ok); if (inspected.ok) { assert.equal(inspected.value.reset, true); assert.deepEqual(inspected.value.changes, []); }
-  } finally { await f.close(); }
+await test("provider normalizer enforces count changes-byte and full-response boundaries without prefixes",async()=>{
+  const f=await fixture();
+  try{
+    const ensured=await f.host.provider.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    let observation:unknown;
+    const fakeService={inspectControl:()=>observation,ensureControlViewer:()=>Promise.resolve({ok:false as const,error:{code:"malformed-control"}}),stopControl:()=>Promise.resolve({ok:false as const,error:{code:"malformed-control"}}),approveControlPairing:()=>Promise.resolve({ok:false as const,error:{code:"unauthorized"}}),close:()=>Promise.resolve()};
+    const provider=new RuntimeControlProvider(fakeService as never,f.slot,f.generation,async()=>undefined);provider.markReady();
+    const observe=()=>provider.inspect({streamId:ensured.value.snapshot.streamId});
+
+    for(const count of [16,17]){
+      const changes=Array.from({length:count},(_,index)=>Object.freeze({...ensured.value.snapshot,revision:index+1})),snapshot=changes.at(-1)!;
+      observation={ok:true,value:{snapshot,changes,reset:false,timedOut:false}};
+      const result=observe();assert.ok(result.ok);if(result.ok){assert.equal(result.value.reset,count===17);assert.equal(result.value.changes.length,count===17?0:16);}
+    }
+
+    const changeAt=(bytes:number)=>{const blank={...ensured.value.snapshot,reason:""},base=encodeCanonicalControlJson([blank]).byteLength,change={...blank,reason:"x".repeat(bytes-base)};assert.equal(encodeCanonicalControlJson([change]).byteLength,bytes);return change;};
+    for(const bytes of [12_288,12_289]){
+      const changes=[changeAt(bytes)];observation={ok:true,value:{snapshot:ensured.value.snapshot,changes,reset:false,timedOut:false}};
+      const result=observe();assert.ok(result.ok);if(result.ok){assert.equal(result.value.reset,bytes===12_289);assert.equal(result.value.changes.length,bytes===12_289?0:1);}
+    }
+
+    const fullAt=(bytes:number)=>{const blank={...ensured.value.snapshot,reason:""},base=encodeCanonicalControlJson({ok:true,value:{snapshot:blank,changes:[],reset:false,timedOut:false}}).byteLength,snapshot={...blank,reason:"x".repeat(bytes-base)};assert.equal(encodeCanonicalControlJson({ok:true,value:{snapshot,changes:[],reset:false,timedOut:false}}).byteLength,bytes);return snapshot;};
+    observation={ok:true,value:{snapshot:fullAt(16_384),changes:[],reset:false,timedOut:false}};const exact=observe();assert.ok(exact.ok);if(exact.ok)assert.equal(exact.value.reset,false);
+    observation={ok:true,value:{snapshot:fullAt(16_385),changes:[],reset:false,timedOut:false}};const fallback=observe();assert.ok(fallback.ok);if(fallback.ok)assert.equal(fallback.value.reset,true);
+    observation={ok:true,value:{snapshot:fullAt(16_386),changes:[],reset:false,timedOut:false}};const overload=observe();assert.equal(overload.ok?"":overload.error.code,"runtime-overload");
+    const timeoutAt=(bytes:number)=>{const blank={...ensured.value.snapshot,reason:""},base=encodeCanonicalControlJson({ok:true,value:{snapshot:blank,changes:[],reset:false,timedOut:true}}).byteLength,snapshot={...blank,reason:"x".repeat(bytes-base)};assert.equal(encodeCanonicalControlJson({ok:true,value:{snapshot,changes:[],reset:false,timedOut:true}}).byteLength,bytes);return snapshot;};
+    observation={ok:true,value:{snapshot:timeoutAt(16_385),changes:[],reset:false,timedOut:true}};const timeoutOverload=observe();assert.equal(timeoutOverload.ok?"":timeoutOverload.error.code,"runtime-overload");
+    observation={ok:true,value:{snapshot:{...fullAt(16_400),phase:"stopped"},changes:[],reset:false,timedOut:false}};const terminalOverload=observe();assert.equal(terminalOverload.ok?"":terminalOverload.error.code,"runtime-overload");
+  }finally{await f.close();}
 });
 
 await test("stop waiting on the shared mutex observes cancellation before linearization",async()=>{
@@ -519,11 +538,33 @@ await test("owner approve response loss is state-unknown and never replayed",asy
   const f=await fixture();try{const target={instanceId:f.generation.instanceId,generation:f.generation.generation};await f.host.close();let requests=0;const server=createHttpServer((request)=>{requests++;request.socket.destroy();});await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen({host:"127.0.0.1",port:f.slot.control.port,exclusive:true},resolve);});try{const owner=new OwnerHttpControl(f.slot.control.port,target,f.slot.control.credential);try{const result=await owner.approveViewerPairing({streamId:randomUUID(),pairingCode:"ABCDEFGH"});assert.equal(result.ok?"":result.error.code,"deadline-exceeded");if(!result.ok)assert.equal(result.error.operationState,"unknown");assert.equal(requests,1);}finally{await owner.close();}}finally{await new Promise<void>((resolve)=>server.close(()=>resolve()));}}finally{await f.close();}
 });
 
-await test("all six clients fail closed for wrong-route DTO status headers and body lengths",async()=>{
-  const f=await fixture();try{const target={instanceId:f.generation.instanceId,generation:f.generation.generation},instance=f.host.provider.instance,snapshot=(await f.host.provider.ensureViewer());assert.ok(snapshot.ok);if(!snapshot.ok)return;await f.host.close();const hello=encodeCanonicalControlJson({ok:true,value:{instance}}),stop=encodeCanonicalControlJson({ok:true,value:{snapshot:snapshot.value.snapshot}}),routes:ClientRoute[]=["hello","ensure","inspect","stop","approve","shutdown"];for(const route of routes){const wrong=route==="hello"?stop:hello,expected=route==="hello"?"local-state-recovery-required":"runtime-exited",base=(body:Uint8Array):Record<string,string>=>({"Content-Type":"application/json; charset=utf-8","Content-Length":String(body.byteLength),"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"}),variants=[{status:200,headers:base(wrong),body:wrong},{status:201,headers:base(route==="hello"?hello:wrong),body:route==="hello"?hello:wrong},{status:200,headers:{...base(wrong),"Content-Length":String(wrong.byteLength+1)},body:wrong},{status:200,headers:Object.fromEntries(Object.entries(base(wrong)).filter(([name])=>name!=="Cache-Control")),body:wrong},{status:200,headers:base(wrong),body:wrong.slice(0,-1)},{status:200,headers:{...base(wrong),"Content-Length":String(wrong.byteLength+1)},body:Buffer.concat([wrong,Buffer.of(0)])}];for(const variant of variants)await fakeControlReply(f.slot.control.port,variant.status,variant.headers,variant.body,async()=>{const result=await invokeClientRoute(route,f.slot,target)as{ok:boolean;error?:ControlError};assert.equal(result.ok?"":result.error?.code,expected);});}}finally{await f.close();}
+await test("all seven clients fail closed for wrong-route DTO status headers and body lengths",async()=>{
+  const f=await fixture();
+  try{
+    const target={instanceId:f.generation.instanceId,generation:f.generation.generation},instance=f.host.provider.instance,snapshot=await f.host.provider.ensureViewer();
+    assert.ok(snapshot.ok);if(!snapshot.ok)return;
+    await f.host.close();
+    const hello=encodeCanonicalControlJson({ok:true,value:{instance}}),stop=encodeCanonicalControlJson({ok:true,value:{snapshot:snapshot.value.snapshot}}),routes:ClientRoute[]=["hello","ensure","inspect","wait","stop","approve","shutdown"];
+    const base=(body:Uint8Array):Record<string,string>=>({"Content-Type":"application/json; charset=utf-8","Content-Length":String(body.byteLength),"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"});
+    for(const route of routes){
+      const wrong=route==="hello"?stop:hello,invalid=route==="hello"?"local-state-recovery-required":"runtime-exited";
+      const cases:ReadonlyArray<readonly[number,Record<string,string>,Uint8Array,boolean]>=[
+        [200,base(wrong),wrong,false],
+        [201,base(hello),hello,false],
+        [200,{...base(hello),"Content-Length":String(hello.byteLength+1)},hello,true],
+        [200,((headers)=>{delete headers["Cache-Control"];return headers;})(base(hello)),hello,false],
+        [200,base(hello),hello.slice(0,-1),true],
+        [200,base(Buffer.concat([hello,Buffer.from(" ")])),Buffer.concat([hello,Buffer.from(" ")]),false],
+      ];
+      for(const [status,headers,body,responseLoss] of cases)await fakeControlReply(f.slot.control.port,status,headers,body,async()=>{
+        const result=await invokeClientRoute(route,f.slot,target)as{ok:boolean;error?:ControlError};
+        assert.equal(result.ok?"":result.error?.code,route==="wait"&&responseLoss?"deadline-exceeded":invalid);
+      });
+    }
+  }finally{await f.close();}
 });
 
-await test("five operation clients enforce exact per-route error membership", async () => {
+await test("six operation clients enforce exact per-route error membership", async () => {
   const f = await fixture();
   try {
     const target = { instanceId: f.generation.instanceId, generation: f.generation.generation };
@@ -531,6 +572,7 @@ await test("five operation clients enforce exact per-route error membership", as
     const memberships: Readonly<Record<Exclude<ClientRoute, "hello">, ReadonlySet<string>>> = {
       ensure: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "unauthorized", "deadline-exceeded"]),
       inspect: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "deadline-exceeded"]),
+      wait: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "deadline-exceeded"]),
       stop: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "deadline-exceeded"]),
       approve: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "unauthorized", "deadline-exceeded"]),
       shutdown: new Set(["instance-conflict", "control-version-mismatch", "malformed-control", "runtime-exited", "runtime-overload", "deadline-exceeded"]),
@@ -559,7 +601,7 @@ await test("completed ensure returns the old stream before a later stop",async()
 
 await test("the ninth authenticated in-flight request is rejected before body allocation",async()=>{const f=await fixture(),sockets:Socket[]=[];try{const bearer=deriveControlBearer(f.slot.control.credential,"client"),authority=`127.0.0.1:${f.slot.control.port}`,prefix=`POST /v1/control/hello HTTP/1.1\r\nHost: ${authority}\r\nAuthorization: FSQ-Control ${bearer}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: 2\r\n\r\n`;for(let index=0;index<8;index++){const socket=await openSocket(f.slot.control.port);socket.write(prefix);sockets.push(socket);}await new Promise(resolve=>setImmediate(resolve));const target={instanceId:f.generation.instanceId,generation:f.generation.generation},request={controlVersion:CONTROL_VERSION,contractVersion:2,deviceRef:f.slot.deviceRef,expectedInstance:target},auth=`FSQ-Control ${bearer}`,reply=await call(f.slot,"/v1/control/hello",request,auth);assert.equal(reply.status,429);for(const socket of sockets.splice(0))socket.destroy();await new Promise(resolve=>setImmediate(resolve));assert.equal((await call(f.slot,"/v1/control/hello",request,auth)).status,200);}finally{for(const socket of sockets)socket.destroy();await f.close();}});
 
-await test("all six clients reject every duplicate mandatory response header",async()=>{const f=await fixture();try{const target={instanceId:f.generation.instanceId,generation:f.generation.generation},instance=f.host.provider.instance;await f.host.close();const body=encodeCanonicalControlJson({ok:true,value:{instance}}),routes:ClientRoute[]=["hello","ensure","inspect","stop","approve","shutdown"];for(const route of routes)for(const header of ["Content-Type","Content-Length","Cache-Control","X-Content-Type-Options"])await fakeDuplicateReply(f.slot.control.port,header,body,async()=>{const result=await invokeClientRoute(route,f.slot,target)as{ok:boolean;error?:ControlError};assert.equal(result.ok?"":result.error?.code,route==="hello"?"local-state-recovery-required":"runtime-exited");});}finally{await f.close();}});
+await test("all seven clients reject every duplicate mandatory response header",async()=>{const f=await fixture();try{const target={instanceId:f.generation.instanceId,generation:f.generation.generation},instance=f.host.provider.instance;await f.host.close();const body=encodeCanonicalControlJson({ok:true,value:{instance}}),routes:ClientRoute[]=["hello","ensure","inspect","wait","stop","approve","shutdown"];for(const route of routes)for(const header of ["Content-Type","Content-Length","Cache-Control","X-Content-Type-Options"])await fakeDuplicateReply(f.slot.control.port,header,body,async()=>{const result=await invokeClientRoute(route,f.slot,target)as{ok:boolean;error?:ControlError};assert.equal(result.ok?"":result.error?.code,route==="hello"?"local-state-recovery-required":"runtime-exited");});}finally{await f.close();}});
 
 await test("header timeout returns fixed 408 and releases preauth admission",async()=>{const f=await fixture();try{const reply=await new Promise<string>((resolve,reject)=>{const socket=netConnect({host:"127.0.0.1",port:f.slot.control.port},()=>socket.write("POST /v1/control/hello HTTP/1.1\r\n")),chunks:Buffer[]=[];socket.on("data",chunk=>chunks.push(Buffer.from(chunk)));socket.on("end",()=>resolve(Buffer.concat(chunks).toString()));socket.on("error",reject);});assert.match(reply,/^HTTP\/1\.1 408 /);const target={instanceId:f.generation.instanceId,generation:f.generation.generation},auth=`FSQ-Control ${deriveControlBearer(f.slot.control.credential,"client")}`;assert.equal((await call(f.slot,"/v1/control/hello",{controlVersion:CONTROL_VERSION,contractVersion:2,deviceRef:f.slot.deviceRef,expectedInstance:target},auth)).status,200);}finally{await f.close();}});
 
@@ -641,4 +683,193 @@ await test("authenticated keep-alive re-arms the next-header deadline at 4999 50
       assert.equal(timer.count(), 0);
     } finally { await f.close(); }
   }
+});
+
+await test("temporary control client proves timeout cancellation session-close and no stream side effect",async()=>{
+  const f=await fixture();
+  try{
+    const hello=await helloControl(f.slot,null);assert.ok(hello.ok);if(!hello.ok)return;
+    const attached=await attachControlSession(f.slot.control.port,{disposition:"attached",instance:hello.value.instance},f.slot.control.credential);assert.ok(attached.ok);if(!attached.ok)return;
+    const ensured=await attached.session.control.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const streamId=ensured.value.snapshot.streamId,revision=ensured.value.snapshot.revision;
+    const inspected=await attached.session.control.inspect({streamId});assert.ok(inspected.ok);if(inspected.ok)assert.equal(inspected.value.timedOut,false);
+    const timeout=await attached.session.control.wait({streamId,afterRevision:revision,waitMs:0});assert.ok(timeout.ok);if(timeout.ok)assert.deepEqual({changes:timeout.value.changes,reset:timeout.value.reset,timedOut:timeout.value.timedOut},{changes:[],reset:false,timedOut:true});
+
+    const controller=new AbortController(),cancelled=attached.session.control.wait({streamId,afterRevision:revision,waitMs:30_000},{signal:controller.signal});
+    await awaitAdmission(f.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    controller.abort();
+    const cancelledResult=await cancelled;
+    assert.equal(cancelledResult.ok?"":cancelledResult.error.code,"request-cancelled");
+    await awaitAdmission(f.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+
+    const closing=attached.session.control.wait({streamId,afterRevision:revision,waitMs:30_000});
+    await awaitAdmission(f.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    await attached.session.close();
+    const closedResult=await closing;
+    assert.equal(closedResult.ok?"":closedResult.error.code,"request-cancelled");
+    await awaitAdmission(f.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+    const after=f.host.provider.inspect({streamId});assert.ok(after.ok);if(after.ok){assert.equal(after.value.snapshot.revision,revision);assert.equal(after.value.snapshot.phase,"demand-pending");}
+    assert.equal(f.source.opens,0);
+    const closed=await attached.session.control.wait({streamId,afterRevision:revision,waitMs:0});assert.equal(closed.ok?"":closed.error.code,"runtime-exited");
+  }finally{await f.close();}
+});
+
+await test("temporary control client freezes stopping then reconnects from the cursor to terminal",async()=>{
+  const f=await fixture();
+  try{
+    const hello=await helloControl(f.slot,null);assert.ok(hello.ok);if(!hello.ok)return;
+    const first=await attachControlSession(f.slot.control.port,{disposition:"attached",instance:hello.value.instance},f.slot.control.credential);assert.ok(first.ok);if(!first.ok)return;
+    const ensured=await first.session.control.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const waiting=first.session.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000});
+    await awaitAdmission(f.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    const stopped=f.host.provider.stopStream({streamId:ensured.value.snapshot.streamId});
+    const firstChange=await waiting;assert.ok(firstChange.ok);if(!firstChange.ok)return;
+    assert.equal(firstChange.value.snapshot.phase,"stopping");
+    assert.deepEqual(firstChange.value.changes.at(-1),firstChange.value.snapshot);
+    assert.equal(firstChange.value.timedOut,false);
+    assert.ok((await stopped).ok);
+    await first.session.close();
+
+    const second=await attachControlSession(f.slot.control.port,{disposition:"attached",instance:hello.value.instance},f.slot.control.credential);assert.ok(second.ok);if(!second.ok)return;
+    const final=await second.session.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:firstChange.value.snapshot.revision,waitMs:30_000});
+    assert.ok(final.ok);if(final.ok){assert.equal(final.value.snapshot.phase,"stopped");assert.deepEqual(final.value.changes.at(-1),final.value.snapshot);assert.equal(final.value.timedOut,false);}
+    await second.session.close();
+    assert.equal(f.source.opens,0);
+  }finally{await f.close();}
+});
+
+await test("Host and StateStore admit four waits and reject the fifth before allocation",async()=>{
+  const f=await fixture(),sessions:RuntimeControlSession[]=[],controllers:AbortController[]=[];
+  try{
+    const hello=await helloControl(f.slot,null);assert.ok(hello.ok);if(!hello.ok)return;
+    for(let index=0;index<5;index++){const attached=await attachControlSession(f.slot.control.port,{disposition:"attached",instance:hello.value.instance},f.slot.control.credential);assert.ok(attached.ok);if(attached.ok)sessions.push(attached.session);}
+    const ensured=await sessions[0]!.control.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const waits:ReturnType<RuntimeControlSession["control"]["wait"]>[]=[];
+    for(let index=0;index<4;index++){
+      const controller=new AbortController();controllers.push(controller);
+      waits.push(sessions[index]!.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000},{signal:controller.signal}));
+      await awaitAdmission(f.host,{preauth:0,authenticated:index+1,inFlight:index+1,waits:index+1});
+    }
+    const fifth=await sessions[4]!.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000});
+    assert.equal(fifth.ok?"":fifth.error.code,"runtime-overload");
+    assert.equal(f.host.admissionSnapshot().waits,4);
+    for(const controller of controllers)controller.abort();
+    const results=await Promise.all(waits);assert.ok(results.every(result=>!result.ok&&result.error.code==="request-cancelled"));
+    for(const session of sessions)await session.close();
+    await awaitAdmission(f.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+  }finally{for(const controller of controllers)controller.abort();for(const session of sessions)await session.close().catch(()=>undefined);await f.close();}
+});
+
+await test("one local client rejects a second wait before opening another socket",async()=>{
+  const f=await fixture();
+  try{
+    const hello=await helloControl(f.slot,null);assert.ok(hello.ok);if(!hello.ok)return;
+    const attached=await attachControlSession(f.slot.control.port,{disposition:"attached",instance:hello.value.instance},f.slot.control.credential);assert.ok(attached.ok);if(!attached.ok)return;
+    const ensured=await attached.session.control.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const controller=new AbortController(),first=attached.session.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000},{signal:controller.signal});
+    await awaitAdmission(f.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    const second=await attached.session.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000});
+    assert.equal(second.ok?"":second.error.code,"runtime-overload");
+    assert.deepEqual(f.host.admissionSnapshot(),{preauth:0,authenticated:1,inFlight:1,waits:1});
+    controller.abort();await first;await attached.session.close();
+    await awaitAdmission(f.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+  }finally{await f.close();}
+});
+
+await test("authenticated legacy feature identity fails as control-version-mismatch without fallback",async()=>{
+  const f=await fixture();
+  try{
+    const target={instanceId:f.generation.instanceId,generation:f.generation.generation},base=(body:Uint8Array):Record<string,string>=>({"Content-Type":"application/json; charset=utf-8","Content-Length":String(body.byteLength),"Cache-Control":"no-store","X-Content-Type-Options":"nosniff"});
+    await f.host.close();
+    const cases:ReadonlyArray<readonly[number,readonly unknown[],string]>=[
+      [200,[],"control-version-mismatch"],
+      [409,[],"local-state-recovery-required"],
+      [200,["watch-v1"],"local-state-recovery-required"],
+      [200,["wait-v1","watch-v1"],"local-state-recovery-required"],
+    ];
+    for(const [status,features,expected] of cases){
+      const body=encodeCanonicalControlJson({ok:true,value:{instance:{controlVersion:CONTROL_VERSION,instanceId:f.generation.instanceId,generation:f.generation.generation,contractVersion:2,deviceRef:f.slot.deviceRef,features}}});
+      await fakeControlReply(f.slot.control.port,status,base(body),body,async()=>{
+        const result=await helloControl(f.slot,target);
+        assert.equal(result.ok?"":result.error.code,expected);
+      });
+    }
+  }finally{await f.close();}
+});
+
+await test("wait request dispatch is exact and invalid requests allocate no wait",async()=>{
+  const f=await fixture();
+  try{
+    const ensured=await f.host.provider.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const target={instanceId:f.generation.instanceId,generation:f.generation.generation},auth=`FSQ-Control ${deriveControlBearer(f.slot.control.credential,"client")}`,base={controlVersion:CONTROL_VERSION,target,streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:0};
+    const extraBody=JSON.stringify({...base,extra:true}),extraReply=await rawRequest(f.slot.control.port,`POST /v1/stream/wait HTTP/1.1\r\nHost: 127.0.0.1:${f.slot.control.port}\r\nAuthorization: ${auth}\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: ${Buffer.byteLength(extraBody)}\r\nConnection: close\r\n\r\n${extraBody}`);
+    assert.match(extraReply,/^HTTP\/1\.1 400 /);assert.equal(f.host.admissionSnapshot().waits,0);
+    for(const request of [{...base,waitMs:30_001},{...base,afterRevision:0}]){
+      const reply=await call(f.slot,"/v1/stream/wait",request,auth);assert.equal(reply.status,400);assert.equal(f.host.admissionSnapshot().waits,0);
+    }
+  }finally{await f.close();}
+});
+
+await test("wait post-connect deadline is exactly waitMs plus five seconds",async()=>{
+  const f=await fixture();
+  try{
+    const instance=f.host.provider.instance;await f.host.close();
+    let accept!:()=>void;const accepted=new Promise<void>(resolve=>{accept=resolve;}),sockets=new Set<Socket>(),server=createNetServer(socket=>{sockets.add(socket);socket.once("close",()=>sockets.delete(socket));socket.once("data",accept);});
+    await new Promise<void>((resolve,reject)=>{server.once("error",reject);server.listen({host:"127.0.0.1",port:f.slot.control.port,exclusive:true},resolve);});
+    try{
+      const timer=new FakeControlTimer(),attached=await attachControlSession(f.slot.control.port,{disposition:"attached",instance},f.slot.control.credential,undefined,timer);assert.ok(attached.ok);if(!attached.ok)return;
+      const pending=attached.session.control.wait({streamId:randomUUID(),afterRevision:1,waitMs:30_000});
+      await accepted;await awaitTimerCount(timer,1);timer.advance(34_999);
+      let settled=false;void pending.then(()=>{settled=true;});await new Promise(resolve=>setImmediate(resolve));assert.equal(settled,false);
+      timer.advance(1);const result=await pending;assert.equal(result.ok?"":result.error.code,"deadline-exceeded");assert.equal(timer.count(),0);await attached.session.close();
+    }finally{for(const socket of sockets)socket.destroy();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+  }finally{await f.close();}
+});
+
+await test("Host hard ceiling is exactly validated waitMs plus five seconds",async()=>{
+  const timer=new FakeControlTimer(),f=await fixture(new FakeClock(),timer);
+  try{
+    const ensured=await f.host.provider.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const original=f.service.waitControl.bind(f.service);
+    let entered!:()=>void;
+    const started=new Promise<void>(resolve=>{entered=resolve;});
+    f.service.waitControl=(_input,signal)=>new Promise<never>((_resolve,reject)=>{
+      entered();
+      if(signal?.aborted)reject(new MutationCancelled());
+      else signal?.addEventListener("abort",()=>reject(new MutationCancelled()),{once:true});
+    });
+    const target={instanceId:f.generation.instanceId,generation:f.generation.generation},auth=`FSQ-Control ${deriveControlBearer(f.slot.control.credential,"client")}`;
+    const pending=call(f.slot,"/v1/stream/wait",{controlVersion:CONTROL_VERSION,target,streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000},auth,{Connection:"close"});
+    await started;await awaitAdmission(f.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    timer.advance(34_999);let settled=false;void pending.then(()=>{settled=true;});await Promise.resolve();assert.equal(settled,false);
+    timer.advance(1);const reply=await pending;assert.equal(reply.status,504);const result=decoded<{ok:false;error:ControlError}>(reply.body);assert.equal(result.error.code,"deadline-exceeded");
+    f.service.waitControl=original;
+    await awaitAdmission(f.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+  }finally{await f.close();}
+});
+
+await test("peer socket and Host close each detach only their pending wait",async()=>{
+  const peerFixture=await fixture();
+  try{
+    const ensured=await peerFixture.host.provider.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const target={instanceId:peerFixture.generation.instanceId,generation:peerFixture.generation.generation},request=await rawMutation(peerFixture.slot,"/v1/stream/wait","client",{controlVersion:CONTROL_VERSION,target,streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000});
+    await awaitAdmission(peerFixture.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    request.socket.destroy();await request.settled;
+    await awaitAdmission(peerFixture.host,{preauth:0,authenticated:0,inFlight:0,waits:0});
+    const unchanged=peerFixture.host.provider.inspect({streamId:ensured.value.snapshot.streamId});assert.ok(unchanged.ok);if(unchanged.ok)assert.equal(unchanged.value.snapshot.revision,ensured.value.snapshot.revision);
+  }finally{await peerFixture.close();}
+
+  const hostFixture=await fixture();
+  try{
+    const hello=await helloControl(hostFixture.slot,null);assert.ok(hello.ok);if(!hello.ok)return;
+    const attached=await attachControlSession(hostFixture.slot.control.port,{disposition:"attached",instance:hello.value.instance},hostFixture.slot.control.credential);assert.ok(attached.ok);if(!attached.ok)return;
+    const ensured=await attached.session.control.ensureViewer();assert.ok(ensured.ok);if(!ensured.ok)return;
+    const waiting=attached.session.control.wait({streamId:ensured.value.snapshot.streamId,afterRevision:ensured.value.snapshot.revision,waitMs:30_000});
+    await awaitAdmission(hostFixture.host,{preauth:0,authenticated:1,inFlight:1,waits:1});
+    await hostFixture.host.close();
+    const lost=await waiting;assert.equal(lost.ok?"":lost.error.code,"deadline-exceeded");
+    assert.deepEqual(hostFixture.host.admissionSnapshot(),{preauth:0,authenticated:0,inFlight:0,waits:0});
+    await attached.session.close();
+    assert.equal(hostFixture.source.opens,0);
+  }finally{await hostFixture.close();}
 });

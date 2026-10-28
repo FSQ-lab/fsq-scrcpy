@@ -185,7 +185,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
 ## macOS Android RuntimeControl v1
 
-本节定义已确认的 `ANDROID-RUNTIME-CONTROL-MACOS-02`；不启用public CLI、wait/watch、Windows、iOS composition或Model Context Protocol。
+本节最初定义`ANDROID-RUNTIME-CONTROL-MACOS-02`基线；下方已确认`ANDROID-CONTROL-WAIT-MACOS-04`只扩展ordinary provider wait。public CLI wait/watch、Windows、iOS composition与Model Context Protocol仍未启用。
 
 ### Deep interface, authority and operations
 
@@ -201,7 +201,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
   ```
 
   `RuntimeControlSession`是client-local object，含serialized-safe `attachment`和普通`control`；`toValue()`只返回`{attachment}`。`close()`/async dispose只关闭该client的keep-alive control sockets与pending local waits，不stop stream或Runtime。Contracts规定的local/serialized enumeration、JSON与inspect边界必须保持。
-- ordinary `control`恰好提供`ensureViewer({signal?})`、`inspect({streamId,afterRevision?},{signal?})`和`stopStream({streamId,expectedRevision?},{signal?})`。composition-root private `RuntimeOwnerControl`另提供`approveViewerPairing({streamId,pairingCode},{signal?})`和`shutdownRuntime({instanceId,generation},{signal?})`；owner methods不挂到ordinary session，不属于serialized值。
+- ordinary `control`恰好提供`ensureViewer({signal?})`、`inspect({streamId,afterRevision?},{signal?})`、`wait({streamId,afterRevision,waitMs},{signal?})`和`stopStream({streamId,expectedRevision?},{signal?})`。composition-root private `RuntimeOwnerControl`另提供`approveViewerPairing({streamId,pairingCode},{signal?})`和`shutdownRuntime({instanceId,generation},{signal?})`；owner methods不挂到ordinary session，不属于serialized值。
 - acquire是唯一auto-binding入口。auto调用已验收Capture resolver；Runtime provider是唯一可调用`revealAndroidBinding`的consumer，并把private binding复制进persistent candidate。known只查已有safe DeviceRef，绝不调用resolver或生成/remap identity。Capture不依赖Runtime，private access不跨provider/client seam。
 - 一个valid persistent slot保存一份32-byte CSPRNG root credential。Runtime按下文HMAC context派生不可互换的client/owner bearer；ordinary session只持有client bearer，owner provider单独持有owner bearer。same-uid malicious process仍是既有out-of-scope；该分权是server-enforced interface authority，不宣称同账号进程隔离。
 
@@ -295,7 +295,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - owner shutdown request必须target匹配且以owner authority认证。它先线性化`shutting-down`并拒绝新ordinary mutation，走现有stream unified first-cause terminalization，关闭Viewer transport，compare-delete matching generation并directory sync，关闭其他control sockets；向发起者flush 200 shutdown result后关闭最后control socket/listener并exit。
 - shutdown删除generation时old listener仍占port；new starter只有在old listener关闭后才可能bind。old crash留下的stale generation由下一caller在确证port free后删除；old cleanup用compare-delete，不能发生new-generation ABA。
 
-### Six-route exact HTTP/1.1 wire contract
+### Seven-route exact HTTP/1.1 wire contract
 
 - listener只绑定exact `127.0.0.1:<stored-port>`，独立于Viewer origin。request-target必须origin-form且无query/fragment/percent escape。routes恰好如下；所有request object字段都必须按列出顺序出现，nullable字段不得省略：
 
@@ -304,12 +304,13 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 | `POST /v1/control/hello` | client | `{controlVersion,contractVersion:2,deviceRef,expectedInstance:null|RuntimeTarget}` | HTTP 200 `ControlResult<HelloControlValue>` |
 | `POST /v1/viewer/ensure` | client | `{controlVersion,target:RuntimeTarget}` | HTTP 200 `ControlResult<EnsureViewerValue>` |
 | `POST /v1/stream/inspect` | client | `{controlVersion,target,streamId,afterRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<InspectControlValue>` |
+| `POST /v1/stream/wait` | client | `{controlVersion,target,streamId,afterRevision:positiveSafeInteger,waitMs:0..30000}` | HTTP 200 `ControlResult<InspectControlValue>` |
 | `POST /v1/stream/stop` | client | `{controlVersion,target,streamId,expectedRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<StopStreamValue>`；revision mismatch HTTP 409 exact snapshot-bearing branch |
 | `POST /v1/viewer/approve` | owner | `{controlVersion,target,streamId,pairingCode}` | HTTP 200 `ControlResult<ApproveViewerValue>` |
 | `POST /v1/runtime/shutdown` | owner | `{controlVersion,target}` | HTTP 200 `ControlResult<ShutdownRuntimeValue>`后按shutdown顺序exit |
 
-- hello的`expectedInstance:null`只用于generation final missing/partial；server仍核对controlVersion、contractVersion和exact DeviceRef，并只在auth与Runtime ready后返回authoritative RuntimeInstance。full final必须发送pair并同时匹配instanceId/generation；任何单字段或pair mismatch fail closed。minor0 `features`恰好`[]`。
-- every non-hello request携带RuntimeTarget；server在operation dispatch前重新核对。旧generation bearer即使root相同也不能让旧request作用于新Runtime。route允许的operation error集合为：hello `control-version-mismatch|instance-conflict|malformed-control|runtime-exited|runtime-overload`；ensure另含`unauthorized`；inspect无unauthorized；stop另含`revision-conflict`；approve另含`unauthorized`；shutdown无unauthorized application branch。所有route均可在transport/lifecycle层产生deadline-exceeded或runtime-exited。
+- hello的`expectedInstance:null`只用于generation final missing/partial；server仍核对controlVersion、contractVersion和exact DeviceRef，并只在auth与Runtime ready后返回authoritative RuntimeInstance。full final必须发送pair并同时匹配instanceId/generation；任何单字段或pair mismatch fail closed。features恰好`["wait-v1"]`；authenticated旧`features:[]`为control-version-mismatch且无fallback。
+- every non-hello request携带RuntimeTarget；server在operation dispatch前重新核对。旧generation bearer即使root相同也不能让旧request作用于新Runtime。route允许的operation error集合为：hello `control-version-mismatch|instance-conflict|malformed-control|runtime-exited|runtime-overload`；ensure另含`unauthorized`；inspect/wait无unauthorized；stop另含`revision-conflict`；approve另含`unauthorized`；shutdown无unauthorized application branch。所有route均可在transport/lifecycle层产生deadline-exceeded或runtime-exited；wait local cancellation为request-cancelled。
 - authenticated application failure使用Contracts表HTTP status与canonical `ControlResult`；revision-conflict使用其唯一branch。unknown authenticated route为404 `{"error":"not-found"}`；wrong method或OPTIONS为405 `{"error":"method-not-allowed"}`。所有body response固定`Content-Type: application/json; charset=utf-8`、exact decimal Content-Length、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`；不发送CORS、redirect或authority echo。
 - `Content-Type`必须exact `application/json; charset=utf-8`；恰好一个canonical decimal Content-Length，值与bytes相同且0..16384；拒绝Transfer-Encoding。wrong content type为415 `{"error":"unsupported-media-type"}`；missing/duplicate/invalid length、premature EOF、noncanonical body为400，oversize为413。header/body deadline在仍可写时为408 `{"error":"request-timeout"}`，否则destroy。transport error JSON同样canonical和fixed safe，不含ControlError identity evidence。
 
@@ -405,3 +406,28 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 ### Verification boundary
 
 Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout、slot revision与authority rotation、generation删除及每个write/sync/close/CAS/rename crash点、reset/reset、reset/rebind、acquire/reset、child/maintenance ABA和pre/post-rename cancellation；所有safe result/inspect/log不得含serial/path/port/credential/binding/PID/grant。真实reset/rebind验收由Integrations同名contract拥有。
+
+## macOS Android RuntimeControl Bounded Wait
+
+本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` Runtime delta。范围不含CLI wait/watch、MCP、Windows、iOS、媒体或平台支持声明。
+
+### Atomic observation and lifecycle
+
+- `RuntimeService.waitControl`只委托唯一`StateStore.wait`。StateStore继续使用现有mutex、最多64 snapshots/524288-byte共享history及Clock；禁止EventEmitter、subscription queue、per-client history或inspect→sleep→inspect。
+- registration线性化点是在同一mutex内完成stream/cursor/terminal/deadline复核并把waiter加入bounded set。每waiter只持cursor、absolute monotonic deadline、resolver、一个timer和一个abort listener；snapshot publication仍在同一mutex内完成current assignment+history append，并同步冻结首个可见wait结果，所以不存在inspect-subscribe gap。
+- timeout从registration取`deadline=Clock.mono()+waitMs`。timer callback必须取得mutex并重查mono；早触发按remaining re-arm。`now>=deadline`的timeout先于尚未published change，返回当时current、空changes、reset false、timedOut true。wall clock不参与。
+- cancel也通过同一mutex：pre-abort或注册前cancel返回request-cancelled；publish先线性化则success胜，cancel先detach则request-cancelled胜，deadline已达到则timeout胜。所有change/timeout/cancel/peer-close/Host-close路径使用一个idempotent disposer，恰好一次detach、clear timer、remove abort listener及释放admission，再settle。
+- current terminal在registration前立即完成；等待中的stopping/final publication按首个revision唤醒。Reconnect只重交streamId/afterRevision并复用共享history；无client cursor。Runtime owner shutdown正常先terminalize，pending wait由publication完成；异常transport loss沿用runtime-exited/deadline-exceeded。
+
+### Provider, Host and client bounds
+
+- `RuntimeControlProvider`将features固定为`["wait-v1"]`，inspect/wait复用同一response normalizer。`StateStore.wait`是4-wait最终backstop；第5个在创建listener/timer前runtime-overload。Provider不建第二套history/queue。
+- Host新增`/v1/stream/wait`与wait admission ledger。现有上限保持：8 pre-auth、8 authenticated connections、8 total in-flight、每socket一个in-flight、每socket64 requests；wait同时占authenticated/in-flight且全局最多4。第5个wait返回HTTP429 canonical runtime-overload且零wait allocation；`ControlAdmissionSnapshot` exact增加`waits`用于cleanup验证。
+- 每个local `HttpRuntimeControl`最多一个active wait；同client第二个在开socket前local runtime-overload。session `close()/asyncDispose`标记closed、取消并等待pending wait、destroy自己的keep-alive sockets；pending wait返回local request-cancelled，stream/Runtime及其他session不受影响；close后调用仍runtime-exited。
+- Client/server不把wait加入mutating集合。Caller AbortSignal即使request已发送仍为request-cancelled，因为wait只读且registration已清理；真正transport hard deadline/response loss才是deadline-exceeded。peer/socket close只取消对应wait。
+
+### Deadlines, sizes and verification
+
+- Provider waitMs为0..30000。既有header/keep-alive 5000ms、body read-idle 2000ms、headers-complete body total 5000ms、connect attempt 1000ms保持；ordinary post-connect total仍5000ms。wait post-connect total恰为`waitMs+5000ms`，response read-idle仍2000ms且受total约束；最大35000ms post-connect/36000ms含connect。Host validated-body后同样以waitMs+5000ms为hard ceiling，超出deadline-exceeded并清waiter。
+- Provider normalizer执行Contracts的16 changes/12288 changes bytes/16384 full response规则；timeout、reset、terminal、change都走同一实现。所有private/provider/media/authority privacy约束保持。
+- Deterministic tests必须覆盖：atomic missed-wake；retained/reset/future；0/30000与deadline-1/exact/early timer/wall jump；首个publication冻结及terminal两步；16/17、12288/16384±1；4/5 waits、8/9 connection/in-flight、same-client第二wait；pre/post-register cancel与publish/deadline race；session/socket/Host close cleanup；reconnect cursor；connect/total/read-idle exact边界。temporary control client真实入口证明timeout、change、terminal、cancel/close、reconnect/reset且无stream side effect；现有CLI viewer ensure/stream inspect scoped tests证明feature tuple及`timedOut:false`透传而命令面无wait/watch；真实设备不可用时单列缺口，不得以fixture冒充。

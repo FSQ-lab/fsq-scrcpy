@@ -24,6 +24,8 @@ import {
   validateRuntimeInstance,
   validateRuntimeTarget,
   validateStopStreamValue,
+  validateWaitControlRequest,
+  validateWaitControlWireRequest,
   type RuntimeControl,
   type RuntimeInstance,
 } from "../src/index.js";
@@ -32,7 +34,7 @@ const ID = "123e4567-e89b-42d3-a456-426614174000";
 const GENERATION = "223e4567-e89b-42d3-a456-426614174000";
 const STREAM = "323e4567-e89b-42d3-a456-426614174000";
 const DEVICE = Object.freeze({ contractVersion: 2 as const, platform: "android" as const, namespace: "fsq.android.local", opaqueId: ID });
-const INSTANCE: RuntimeInstance = Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: ID, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze([]) as readonly [] });
+const INSTANCE: RuntimeInstance = Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: ID, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1"] as const) });
 const ATTACHMENT = Object.freeze({ disposition: "attached" as const, instance: INSTANCE });
 const DESCRIPTOR = Object.freeze({ contractVersion: 2 as const, streamId: STREAM, standaloneUri: `http://127.0.0.1:43210/viewer/${STREAM}`, presentationModes: Object.freeze(["standalone"] as const), expiresAt: 1_800_000_060_000 });
 const SNAPSHOT = Object.freeze({ streamId: STREAM, deviceRef: DEVICE, revision: 1, phase: "demand-pending" as const, activeViewerCount: 0 as const, updatedAt: 1_800_000_000_000 });
@@ -68,8 +70,11 @@ await test("RuntimeInstance version, feature and identity axes remain independen
     { controlVersion: { major: 2, minor: 0 } },
     { controlVersion: { major: 1, minor: 1 } },
     { contractVersion: 1 },
-    { features: ["wait-v1"] },
-    { features: Object.assign([], { hidden: true }) },
+    { features: [] },
+    { features: ["wait-v1", "wait-v1"] },
+    { features: ["unknown"] },
+    { features: Object.assign(["wait-v1"], { hidden: true }) },
+    { features: Object.defineProperty(["wait-v1"], "0", { get: () => "wait-v1", enumerable: true }) },
     { instanceId: STREAM.toUpperCase() },
     { generation: "00000000-0000-4000-8000-000000000000", pid: 42 },
   ]) invalid(() => validateRuntimeInstance({ ...INSTANCE, ...change }));
@@ -96,17 +101,22 @@ await test("every ControlError has one tuple, one message and one HTTP mapping",
 
 await test("wire values validate exact ensure, inspect, stop and owner records", () => {
   const ensure = Object.freeze({ deviceRef: DEVICE, descriptor: DESCRIPTOR, snapshot: SNAPSHOT });
-  const inspectValue = Object.freeze({ snapshot: SNAPSHOT, changes: Object.freeze([SNAPSHOT]), reset: false });
+  const inspectValue = Object.freeze({ snapshot: SNAPSHOT, changes: Object.freeze([SNAPSHOT]), reset: false, timedOut: false });
   const stop = Object.freeze({ snapshot: SNAPSHOT });
   const approve = Object.freeze({ snapshot: SNAPSHOT, approvedAt: Number.MAX_SAFE_INTEGER });
   const shutdown = Object.freeze({ instanceId: ID, generation: GENERATION });
   assert.equal(validateEnsureViewerValue(ensure), ensure);
   assert.equal(validateInspectControlValue(inspectValue), inspectValue);
+  const snapshotJson = new TextDecoder().decode(encodeCanonicalControlJson(SNAPSHOT));
+  const observationJson = `{"ok":true,"value":{"snapshot":${snapshotJson},"changes":[${snapshotJson}],"reset":false,"timedOut":false}}`;
+  assert.equal(new TextDecoder().decode(encodeCanonicalControlJson({ ok: true, value: inspectValue })), observationJson);
+  assert.equal(validateInspectControlValue((validateControlResult(parseCanonicalControlJson(bytes(observationJson))) as { ok: true; value: unknown }).value).timedOut, false);
   assert.equal(validateStopStreamValue(stop), stop);
   for (const value of [{ attachment: ATTACHMENT }, { instance: INSTANCE }, ensure, inspectValue, stop, approve, shutdown]) assert.equal(validateControlWireValue(value), value);
   invalid(() => validateControlWireValue({ ...ensure, viewerGrant: "secret" }));
-  invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, changes: Array(17).fill(SNAPSHOT), reset: false }));
-  invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, changes: Object.assign([SNAPSHOT], { hidden: true }), reset: false }));
+  invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, changes: Array(17).fill(SNAPSHOT), reset: false, timedOut: false }));
+  invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, changes: Object.assign([SNAPSHOT], { hidden: true }), reset: false, timedOut: false }));
+  invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, changes: [], reset: false }));
   invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, approvedAt: -1 }));
   invalid(() => validateControlWireValue({ snapshot: SNAPSHOT, approvedAt: 1.5 }));
 });
@@ -146,6 +156,7 @@ await test("canonical requests preserve nullable fields and exact route orders",
     [{ controlVersion: CONTROL_VERSION, contractVersion: 2, deviceRef: DEVICE, expectedInstance: null }, `{"controlVersion":{"major":1,"minor":0},"contractVersion":2,"deviceRef":{"contractVersion":2,"platform":"android","namespace":"fsq.android.local","opaqueId":"${ID}"},"expectedInstance":null}`],
     [{ controlVersion: CONTROL_VERSION, target }, `{"controlVersion":{"major":1,"minor":0},"target":{"instanceId":"${ID}","generation":"${GENERATION}"}}`],
     [{ controlVersion: CONTROL_VERSION, target, streamId: STREAM, afterRevision: null }, `{"controlVersion":{"major":1,"minor":0},"target":{"instanceId":"${ID}","generation":"${GENERATION}"},"streamId":"${STREAM}","afterRevision":null}`],
+    [{ controlVersion: CONTROL_VERSION, target, streamId: STREAM, afterRevision: 1, waitMs: 30_000 }, `{"controlVersion":{"major":1,"minor":0},"target":{"instanceId":"${ID}","generation":"${GENERATION}"},"streamId":"${STREAM}","afterRevision":1,"waitMs":30000}`],
     [{ controlVersion: CONTROL_VERSION, target, streamId: STREAM, expectedRevision: 9 }, `{"controlVersion":{"major":1,"minor":0},"target":{"instanceId":"${ID}","generation":"${GENERATION}"},"streamId":"${STREAM}","expectedRevision":9}`],
     [{ controlVersion: CONTROL_VERSION, target, streamId: STREAM, pairingCode: "ABCDEFGH" }, `{"controlVersion":{"major":1,"minor":0},"target":{"instanceId":"${ID}","generation":"${GENERATION}"},"streamId":"${STREAM}","pairingCode":"ABCDEFGH"}`],
   ];
@@ -192,6 +203,7 @@ await test("RuntimeControlSession exposes only a deeply frozen attachment", asyn
   const control: RuntimeControl = {
     async ensureViewer() { calls.push("ensure"); return { ok: false, error: controlError("instance-not-found") }; },
     async inspect() { calls.push("inspect"); return { ok: false, error: controlError("instance-not-found") }; },
+    async wait() { calls.push("wait"); return { ok: false, error: controlError("instance-not-found") }; },
     async stopStream() { calls.push("stop"); return { ok: false, error: controlError("instance-not-found") }; },
     async close() { calls.push("close"); },
   };
@@ -209,29 +221,74 @@ await test("RuntimeControlSession exposes only a deeply frozen attachment", asyn
   assert.deepEqual(JSON.parse(JSON.stringify(session)), { attachment: session.attachment });
   assert.deepEqual(inspect(session), inspect({ attachment: session.attachment }));
   const rendered = inspect(session);
-  for (const privateValue of ["ensureViewer", "stopStream", "FSQ-Control", "FSQ-Owner", "credential", "viewerGrant"]) assert.equal(rendered.includes(privateValue), false);
-  await session.close(); await session[Symbol.asyncDispose]();
-  assert.deepEqual(calls, ["close", "close"]);
+  for (const privateValue of ["ensureViewer", "wait", "stopStream", "FSQ-Control", "FSQ-Owner", "credential", "viewerGrant"]) assert.equal(rendered.includes(privateValue), false);
+  await session.control.wait({ streamId: STREAM, afterRevision: 1, waitMs: 0 }); await session.close(); await session[Symbol.asyncDispose]();
+  assert.deepEqual(calls, ["wait", "close", "close"]);
 });
 
 await test("session constructor copies attachment and rejects forged values", () => {
   const mutableDevice: { contractVersion: 2; platform: "android"; namespace: string; opaqueId: string } = { ...DEVICE };
-  const mutable = { disposition: "started" as const, instance: { ...INSTANCE, deviceRef: mutableDevice, controlVersion: { ...CONTROL_VERSION }, features: [] as [] } };
-  const control = { ensureViewer: async () => ({ ok: false as const, error: controlError("instance-not-found") }), inspect: async () => ({ ok: false as const, error: controlError("instance-not-found") }), stopStream: async () => ({ ok: false as const, error: controlError("instance-not-found") }), close: async () => undefined };
+  const mutable = { disposition: "started" as const, instance: { ...INSTANCE, deviceRef: mutableDevice, controlVersion: { ...CONTROL_VERSION }, features: ["wait-v1"] as ["wait-v1"] } };
+  const control = { ensureViewer: async () => ({ ok: false as const, error: controlError("instance-not-found") }), inspect: async () => ({ ok: false as const, error: controlError("instance-not-found") }), wait: async () => ({ ok: false as const, error: controlError("instance-not-found") }), stopStream: async () => ({ ok: false as const, error: controlError("instance-not-found") }), close: async () => undefined };
   const session = new RuntimeControlSession(mutable, control);
   mutable.instance.deviceRef.namespace = "changed";
+  mutable.instance.features.push("wait-v1");
+  assert.deepEqual(session.attachment.instance.features, ["wait-v1"]);
   assert.equal(session.attachment.instance.deviceRef.namespace, "fsq.android.local");
   invalid(() => new RuntimeControlSession({ ...ATTACHMENT, disposition: "other" as never }, control));
 });
 
-await test("inspect values admit exactly sixteen ordered changes and reject seventeen", () => {
+await test("inspect values enforce exact timeout/reset/change states and sixteen-change bound", () => {
   const changes = Object.freeze(Array.from({ length: 16 }, (_, index) => Object.freeze({ ...SNAPSHOT, revision: index + 1 })));
-  const value = Object.freeze({ snapshot: changes.at(-1)!, changes, reset: false });
+  const value = Object.freeze({ snapshot: changes.at(-1)!, changes, reset: false, timedOut: false });
   assert.equal(validateInspectControlValue(value), value);
   assert.equal(encodeCanonicalControlJson(changes).byteLength > 0, true);
-  invalid(() => validateInspectControlValue({ ...value, changes: [...changes, Object.freeze({ ...SNAPSHOT, revision: 17 })] }));
-  invalid(() => validateInspectControlValue({ ...value, changes: changes.slice().reverse(), reset: 0 }));
+  for (const invalidValue of [
+    { ...value, changes: [...changes, Object.freeze({ ...SNAPSHOT, revision: 17 })] },
+    { ...value, changes: changes.slice().reverse() },
+    { snapshot: { ...SNAPSHOT, revision: 2 }, changes: [SNAPSHOT], reset: false, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [{ ...SNAPSHOT, deviceRef: { ...DEVICE, opaqueId: GENERATION } }], reset: false, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [], reset: true, timedOut: true },
+    { snapshot: SNAPSHOT, changes: [SNAPSHOT], reset: true, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [SNAPSHOT], reset: false, timedOut: true },
+    { snapshot: SNAPSHOT, changes: [], reset: 0, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: 0 },
+  ]) invalid(() => validateInspectControlValue(invalidValue));
+  for (const accepted of [
+    { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [], reset: true, timedOut: false },
+    { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: true },
+  ]) assert.equal(validateInspectControlValue(accepted), accepted);
 });
+await test("wait requests enforce exact local and canonical wire boundaries", () => {
+  const target = Object.freeze({ instanceId: ID, generation: GENERATION });
+  for (const waitMs of [0, 30_000]) {
+    const local = Object.freeze({ streamId: STREAM, afterRevision: Number.MAX_SAFE_INTEGER, waitMs });
+    assert.equal(validateWaitControlRequest(local), local);
+    const wire = Object.freeze({ controlVersion: CONTROL_VERSION, target, ...local });
+    assert.equal(validateWaitControlWireRequest(wire), wire);
+    assert.equal(validateWaitControlWireRequest(parseCanonicalControlJson(encodeCanonicalControlJson(wire))).waitMs, waitMs);
+  }
+  const reordered = bytes(JSON.stringify({ controlVersion: CONTROL_VERSION, target, streamId: STREAM, waitMs: 0, afterRevision: 1 }));
+  invalid(() => parseCanonicalControlJson(reordered));
+  for (const value of [
+    { streamId: STREAM, afterRevision: 0, waitMs: 0 },
+    { streamId: STREAM, afterRevision: -0, waitMs: 0 },
+    { streamId: STREAM, afterRevision: 1.5, waitMs: 0 },
+    { streamId: STREAM, afterRevision: Number.MAX_SAFE_INTEGER + 1, waitMs: 0 },
+    { streamId: STREAM, afterRevision: "1", waitMs: 0 },
+    { streamId: STREAM.toUpperCase(), afterRevision: 1, waitMs: 0 },
+    { streamId: STREAM, afterRevision: 1, waitMs: -1 },
+    { streamId: STREAM, afterRevision: 1, waitMs: -0 },
+    { streamId: STREAM, afterRevision: 1, waitMs: 30_001 },
+    { streamId: STREAM, afterRevision: 1, waitMs: 0.5 },
+    { streamId: STREAM, afterRevision: 1, waitMs: "0" },
+    { streamId: STREAM, afterRevision: 1, waitMs: 0, extra: true },
+  ]) invalid(() => validateWaitControlRequest(value));
+  invalid(() => validateWaitControlWireRequest({ controlVersion: CONTROL_VERSION, target, streamId: STREAM, afterRevision: 1, waitMs: 0, extra: true }));
+  invalid(() => validateWaitControlWireRequest({ controlVersion: CONTROL_VERSION, target, streamId: STREAM, afterRevision: 1 }));
+});
+
 
 await test("control wall times and positive revision fields preserve exact numeric boundaries", () => {
   const maxSnapshot = Object.freeze({ ...SNAPSHOT, revision: Number.MAX_SAFE_INTEGER, updatedAt: Number.MAX_SAFE_INTEGER });
