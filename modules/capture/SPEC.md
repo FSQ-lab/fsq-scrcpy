@@ -121,3 +121,35 @@ Session precedes frames. Each epoch contains exactly one normalized `CodecConfig
 - WDA 最多保留一个 parsed 未交付 JPEG，后者替换前者并记录 drop，不产生 decoder GAP。控制/terminal 有界且不可丢；恰好一次 whole-stream terminal，之后无事件。
 - stop/cancel 关闭 FSQ socket、清空 parser/队列并等待 producer 退出；不触及外部 WDA、forward 或 Session。安全错误使用固定 stage，不暴露 endpoint 或原始 provider error。
 
+## Automatic Single Android Binding v1
+
+本节定义 `ANDROID-AUTO-BINDING-MACOS-01` 的macOS owner-private binding解析；不修改CaptureSource、创建DeviceRef、持久化设备状态、启动Capture或建立Agent/CLI/RuntimeControl行为。
+
+### Interface and exact values
+
+- Capture模块入口固定为 `resolveSingleAndroidBinding(options?) -> Promise<AndroidBindingResult>` 与 `revealAndroidBinding(access) -> ResolvedAndroidBinding`。`options`缺省或恰好为 `{signal?:AbortSignal}`；shape先于signal状态与任何I/O校验，额外字段、错误类型或非原生AbortSignal同步抛固定 `TypeError("Invalid Android binding options")`。shape合法且signal已aborted才按下文返回device-unavailable。构造纯值零I/O。
+- `AndroidBindingResult` 恰好为 `{ok:true,value:{access}} | {ok:false,error}`。error恰好为 `{code,safeMessage}`，禁止额外字段；code/safeMessage固定复用：`dependency-unavailable`/`Required dependency is unavailable`、`adb-incompatible`/`ADB is incompatible`、`device-not-found`/`Device was not found`、`device-ambiguous`/`Device selection is ambiguous`、`device-unavailable`/`Device is unavailable`、`artifact-unavailable`/`Artifact is unavailable`、`artifact-mismatch`/`Artifact verification failed`。不抛原始provider/I/O错误。
+- `AndroidBindingSnapshot` 恰好为深冻结 `{bindingVersion:1,platform:"android",provider:"scrcpy-v5.0.1",adbVersion,artifactVersion:"5.0.1",artifactSha256:"764eb6f79811d5211fe9df341120882ba9994c7a61b897d7bf3fb662e53bc536",observedAt}`；adbVersion恰好为下文grammar捕获并规范化的`<major>.<minor>.<patch>`，最多17 ASCII bytes；observedAt是0..Number.MAX_SAFE_INTEGER integer Unix epoch milliseconds，采样值不满足该范围时在任何异步I/O前返回device-unavailable。snapshot不含DeviceRef、serial、路径、端口、client或artifact path。
+- `AndroidBindingAccess`为含ECMAScript private fields的冻结wrapper；唯一enumerable own property是snapshot；`toJSON()`恰好返回 `{snapshot}`；普通/symbol枚举只能看到snapshot；字符串/default primitive与Node inspect为 `[REDACTED]`。唯一私密出口 `revealAndroidBinding(access)` 只接受本模块工厂创建的access，返回深冻结 `ResolvedAndroidBinding={serial,adbPath,cacheRoot,artifactSource:{mode:"online"}}`；foreign/forged值同步抛固定 `TypeError("Invalid Android binding access")`，无I/O或provider细节。Integrations、Agent、Contracts与普通输出不得取得或调用。
+
+### Fixed zero-configuration policy
+
+- 操作开始时只快照当前进程PATH；不读取 `FSQ_*`、`ADB_*`、HOME覆盖、cwd配置或调用方路径。按Node path delimiter拆分；空或非绝对PATH entry直接忽略且永不按cwd解析。对每个absolute entry拼接basename `adb` 后调用realpath；directory/final symlink允许解析到canonical target，但canonical target必须是普通非符号链接文件并通过`X_OK`。首个有效canonical realpath固定为private adbPath；后续重复/其他candidate不再选择。零有效候选为dependency-unavailable，不扫描默认安装目录。
+- 固定cacheRoot由Node `os.userInfo().homedir`加 `Library/Caches/FSQ_scrcpy` 得到；创建/验证0700、当前有效uid、非符号链接及既有Private-Cache Threat Model祖先规则。artifactSource固定 `{mode:"online"}`，复用现有签名/checksum/SHA-256/lock/cache实现；不提供offline/custom输入。
+- 对选定adbPath执行5秒bounded `adb version`与 `adb devices -l`，stdout/stderr各64KiB。version stdout按LF或CRLF分行；第一行必须完全匹配 `^Android Debug Bridge version (0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})$`，三个值均≤65535。snapshot adbVersion恰好为捕获十进制值以句点连接的canonical `major.minor.patch`；后续行允许存在但不解析、不存储、不输出。非ASCII、替换字符、额外prefix/suffix、首行不匹配或值越界均为adb-incompatible。
+- devices输出使用既有bounded parser规则，但resolver按原始非空设备行计数：0行为device-not-found；超过1行为device-ambiguous，即使只有一行state=device也不自动选它；恰好1行但state不是`device`为device-unavailable；恰好1行state=`device`时serial必须非空、最多256 ASCII且不含空白/C0/C1，否则adb-incompatible。serial仅进入private access。
+- resolver随后执行该serial的既有5秒 `get-state`；结果必须exact `device`，否则device-unavailable。不得执行shell、push、reverse、forward、start-server/kill-server、设备设置或其他命令；普通Android Debug Bridge client如上游行为所需可连接/启动用户全局server，但resolver从不取得其ownership。
+
+### Lifecycle, cancellation and privacy
+
+- 单调阶段固定为：S0 options/PATH与pre-abort；S1 `adb version`→`devices -l`→`get-state`；S2 fixed online artifact acquire/verify及其lock release；S3 access wrapper同步创建。每次await返回后先检查AbortSignal再解释值/推进阶段。S3 wrapper创建是唯一success linearization point。
+- shape合法后的pre-abort，以及S0 PATH realpath/lstat/access任一await后或S1任一点在S3前观察到abort，停止后续候选/probe，取消并等待已创建的owned Android Debug Bridge child（如有）后返回device-unavailable；不可取消的单次filesystem await完成后立即检查signal且不得继续I/O。进入S2前再次检查signal，S2任一点在artifact完成/lock release后推进前观察到abort，完成artifact cleanup后返回artifact-unavailable。若promise先以固定业务错误settle且紧邻检查时signal未abort，保留该业务错误。S3后late abort不改变success/access。
+- cleanup失败不返回partial access：S1清理失败仍固定device-unavailable，S2清理失败固定artifact-unavailable；原cleanup/provider错误不外泄。只有Android Debug Bridge与artifact两侧成功、lock/child/file资源全释放且最后signal检查通过才同步创建access。
+- 同时调用不创建产品级全局mutex；Android Debug Bridge只读probe可并发，artifact复用既有per-identity bounded lock。每个调用独立snapshot PATH/observedAt；不缓存serial、access或失败。所有临时stdout/stderr、devices原文、serial、路径、未采用private DTO及内部错误在结束路径释放且不写普通日志；safe result、JSON、inspect、exception、模型输出及全仓搜索不得包含serial/路径/artifact path。
+
+### Verification and real acceptance
+
+- 验证必须覆盖options shape先于pre-abort、固定TypeError、invalid reveal、PATH空/相对/重复/无效/目录与final symlink canonicalization/不可执行、version LF/CRLF/first-line完整grammar/额外行/非ASCII/值界/64KiB、devices 0/1/2行及authorized/offline/unauthorized、serial值域、get-state mismatch、artifact online成功/签名与cache失败、S0/S1/S2/S3边界取消和cleanup优先级、late abort、并发artifact lock、wrapper/reveal唯一私密出口及全量序列化/日志脱敏。
+- fake Android Debug Bridge断言命令集合恰好为version、devices -l、目标serial get-state；任何shell/push/reverse/kill-server调用使测试失败。resolver完成后无owned child/lock/socket残留。
+- 真实macOS arm64/USB Android验收记录Android Debug Bridge与artifact安全版本信息、恰好一台authorized设备、resolver成功与重复成功、零普通locator泄漏，并证明调用前后没有新增reverse、remote artifact、Capture session、Viewer或设备设置变化。该验收不替代已完成的Android standalone回归，也不形成Agent/Windows/platform支持声明。
+

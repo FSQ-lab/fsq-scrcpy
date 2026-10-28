@@ -122,3 +122,52 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 - 一次 draw 或 discard 完成并关闭图像后立即发送一条合并 minor1 ACK：paint 推进两水位，discard 只推进 release。不能拆成先 release 后补 paint，也不能等待四帧或 lease tick。媒体模式/额度由 Runtime 接受的 Session 决定，不由客户端字段选择。
 
 
+## Local RuntimeControl Values v1
+
+本节定义已确认的 `ANDROID-RUNTIME-CONTROL-MACOS-02` 本机cross-process control值；不启用CLI、wait/watch、Windows、iOS或Model Context Protocol。
+
+### Exact values and local/serialized split
+
+- `ControlVersion`恰好为 `{major:1,minor:0}`；与Contracts `contractVersion:2`和FSQV media版本独立。`RuntimeTarget`恰好为 `{instanceId,generation}`，两者都是canonical non-nil RFC4122 variant-1/version-4 UUID。
+- `DeviceSelector`恰好为 `{kind:"auto",platform:"android"}` 或 `{kind:"known",deviceRef:DeviceRef}`；额外字段、iOS/未知platform和错误prototype拒绝。auto允许首次生成或复用安全DeviceRef；known从不生成、重映射或修改identity。
+- `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:[]}`。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
+- `HelloControlValue`恰好为 `{instance:RuntimeInstance}`。`EnsureViewerValue`恰好为 `{deviceRef,descriptor:ViewerDescriptor,snapshot:StreamSnapshot}`。`InspectControlValue`恰好为 `{snapshot,changes,reset}`。`StopStreamValue`恰好为 `{snapshot}`。owner-only `ApproveViewerValue`恰好为 `{snapshot,approvedAt}`；`approvedAt`是`0..Number.MAX_SAFE_INTEGER`的integer Unix epoch milliseconds。owner-only `ShutdownRuntimeValue`恰好为 `{instanceId,generation}`。
+- `ControlWireValue`只包含本节列出的plain serialized values。generic `ControlResult<T extends ControlWireValue>`恰好为 `{ok:true,value:T}|{ok:false,error:ControlError}`。只有stop expectedRevision mismatch使用 `{ok:false,error:RevisionConflictError,snapshot:StreamSnapshot}`；任何其他失败禁止`snapshot`。
+- `RuntimeControlSession`、control/owner methods、`AbortSignal`、socket、credential、ViewerGrant、pairingId及provider object不是`ControlWireValue`，不得传给generic serializer。Runtime本地成功acquire类型必须使用独立的`{ok:true,session:RuntimeControlSession}`分支，不能把含方法的session放入serialized `ControlResult`。
+- local session的唯一enumerable own property是深冻结`attachment`；control保存于ECMAScript private field并由prototype getter取得。`Object.keys`、ordinary/symbol enumeration只能看见`attachment`；`toValue()`和`toJSON()`恰好返回深冻结`{attachment}`；Node custom inspect恰好显示`{attachment}`。普通`RuntimeControlSession`从不持有或暴露owner control。
+
+### Canonical Control JSON
+
+- control request/response body使用`CanonicalControlJson`：UTF-8、无BOM、无前后空白、无insignificant whitespace、一个top-level object、无duplicate key。只接受ordinary object或null-prototype object；拒绝array作为top level、非finite/coerced/exponent/negative-zero number、错误prototype、accessor、symbol和额外字段。
+- encoder等价于对已严格验证且按下列固定key order构造的plain DTO执行ECMAScript `JSON.stringify`，再以UTF-8编码。client发送的bytes经strict parse和相同encoder重新编码后必须逐byte相等；否则为`malformed-control`。`Content-Length`、12KiB changes与16KiB body limit均只计body的实际UTF-8 octets，不计headers。
+- 固定nested key order为：`ControlVersion: major,minor`；`RuntimeTarget: instanceId,generation`；`DeviceRef: contractVersion,platform,namespace,opaqueId`；`RuntimeInstance: controlVersion,instanceId,generation,contractVersion,deviceRef,features`；`RuntimeAttachment: disposition,instance`；`ControlError: controlVersion,code,disposition,operationState,safeMessage`；`RevisionConflictError`同顺序并以`code`置于`controlVersion`后。`ViewerDescriptor`、`StreamSnapshot`及其nested `Size`沿用Contracts v2声明的field order；合法optional field缺失时省略，wire request中下文声明为nullable的field必须出现且使用`null`，不得省略。
+- top-level result key order恰好为success `ok,value`、ordinary failure `ok,error`、revision conflict `ok,error,snapshot`。array保持语义顺序；`features`在本feature恰好为空数组。
+- `InspectControlValue`最多16个`changes`，且canonical `changes` array最多12288 bytes；完整canonical response body最多16384 bytes。任一changes cap超出时不得切prefix，改为`{snapshot:current,changes:[],reset:true}`；该fallback完整response仍超16384 bytes时返回`runtime-overload`。边界值16、12288和16384允许，任一超过1即不允许。
+
+### Exact control errors
+
+`ControlError`恰好为 `{controlVersion,code,disposition,operationState,safeMessage}`；validator必须按下表接受唯一tuple和唯一message，拒绝任何其他组合、额外字段、raw cause或stack。HTTP列是authenticated route的映射；`local`表示只由local acquire/client cancellation产生。
+
+| code | disposition | operationState | safeMessage | HTTP | 精确适用条件 |
+| --- | --- | --- | --- | ---: | --- |
+| `instance-not-found` | `recoverable` | `not-applied` | `No matching Runtime is available.` | 404 | attach-only无listener，或known slot不存在 |
+| `instance-conflict` | `terminal` | `not-applied` | `The Runtime identity does not match.` | 409 | authenticated DeviceRef/target/full generation不匹配 |
+| `control-version-mismatch` | `terminal` | `not-applied` | `The RuntimeControl version is incompatible.` | 409 | control major/minor或Contracts version不兼容 |
+| `unauthorized` | `terminal` | `not-applied` | `Authorization failed.` | 401 | ensure owner grant已过期；approve pending/code/grant无效。wire bearer失败使用固定transport 401，不产生identity-bearing body |
+| `malformed-control` | `terminal` | `not-applied` | `The control request is invalid.` | 400 | canonical/schema/value/unknown stream/非法revision失败 |
+| `deadline-exceeded` | `state-unknown` | `unknown` | `The control operation deadline was exceeded; its outcome is unknown.` | 504/local | dispatch、readiness或mutation可能已线性化后，response budget或cancel先结束本地等待 |
+| `request-cancelled` | `recoverable` | `not-applied` | `The control request was cancelled before it was applied.` | local | 能证明spawn/readiness/mutation线性化前取消获胜 |
+| `runtime-exited` | `state-unknown` | `unknown` | `The Runtime exited before its result was known.` | 503 | spawn后child/authority/connection异常终止且无法协调结果 |
+| `runtime-overload` | `recoverable` | `not-applied` | `The Runtime control plane is at capacity.` | 429 | socket/request/history/response/internal admission cap |
+| `dependency-unavailable` | `terminal` | `not-applied` | `Required dependency is unavailable.` | 503 | Capture resolver同名failure |
+| `adb-incompatible` | `terminal` | `not-applied` | `ADB is incompatible.` | 503 | Capture resolver同名failure |
+| `device-not-found` | `terminal` | `not-applied` | `Device was not found.` | 404 | Capture resolver同名failure |
+| `device-ambiguous` | `terminal` | `not-applied` | `Device selection is ambiguous.` | 409 | Capture resolver同名failure或published binding不同 |
+| `device-unavailable` | `terminal` | `not-applied` | `Device is unavailable.` | 503 | Capture resolver同名failure |
+| `artifact-unavailable` | `terminal` | `not-applied` | `Artifact is unavailable.` | 503 | Capture resolver同名failure |
+| `artifact-mismatch` | `terminal` | `not-applied` | `Artifact verification failed.` | 412 | Capture resolver同名failure |
+| `local-state-recovery-required` | `terminal` | `not-applied` | `Local Runtime state requires owner recovery.` | 409 | persistent corruption、credential/state不一致或occupied port ownership不确定 |
+
+- `RevisionConflictError`恰好为 `{controlVersion,code:"revision-conflict",disposition:"recoverable",operationState:"not-applied",safeMessage:"The expected revision does not match."}`，HTTP 409且必须携带unchanged current snapshot；任何其他error禁止snapshot。
+- Capture resolver七个fixed errors逐code、逐safeMessage映射，不包装原异常。现有in-process ensure的`malformed-control|runtime-overload|unauthorized`同名映射；inspect unknown stream/afterRevision非法映射`malformed-control`；stop expectedRevision mismatch唯一映射`revision-conflict`。Runtime control startup bind失败不向union新增`runtime-bind-failed`，而按是否存在可协调listener映射`instance-conflict|runtime-exited|local-state-recovery-required`。
+- 所有值沿用Contracts v2 canonical UUID/time/size/string安全规则；control值不得含provider、serial、endpoint、path、PID、root/client/owner credential、ViewerGrant、pairingId、cookie、media或Appium Session字段。

@@ -10,6 +10,7 @@ export class FakeClock implements Clock {
   set(delay: number, callback: () => void): object { const id = this.#next++; this.#timers.set(id,{ at:this.monoNow+delay,callback }); return { id }; }
   clear(handle: object): void { this.#timers.delete((handle as {id:number}).id); }
   tick(ms: number): void { const end=this.monoNow+ms, wallEnd=this.wallNow+ms; for (;;) { const due=[...this.#timers].filter(([,t])=>t.at<=end).sort((a,b)=>a[1].at-b[1].at)[0]; if (!due) break; this.wallNow+=due[1].at-this.monoNow; this.monoNow=due[1].at; this.#timers.delete(due[0]); due[1].callback(); } this.monoNow=end; this.wallNow=wallEnd; }
+  fireNextTimerEarly(): void { const next=[...this.#timers].sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0]; if (!next || next[1].at<=this.monoNow) throw new Error("no future timer"); const early=next[1].at-1; this.wallNow+=early-this.monoNow; this.monoNow=early; this.#timers.delete(next[0]); next[1].callback(); }
   jumpWall(ms: number): void { this.wallNow += ms; }
   advanceWithoutTimers(ms: number): void { this.monoNow += ms; this.wallNow += ms; }
 }

@@ -1,6 +1,6 @@
 # iOS WDA Observation — Design Repair and Gate Decision
 
-- Status: confirmed ACK/profile SPEC and one-feature exception implemented; WP3 full+repair1 and WP4 cumulative full+repair1 code audits closed all reported findings. Shared Viewer implementation and available no-device checks passed. Native Chrome/iPhone/WDA/forward and applicable Android real acceptance remain blocked; no feature/platform Done or support entry.
+- Status: confirmed ACK/profile SPEC and one-feature exception implemented; WP3 full+repair1 and WP4 cumulative full+repair1 code audits closed all findings. Native iPhone/WDA/Chrome standalone acceptance now includes real grace-expiry cleanup and exact reason-3/no-Config wire evidence after one focused Runtime timer repair. The user moved Appium Session-transition verification to the later Agent integration feature, so `IOS-WDA-STANDALONE-01` is Done; Android regression, unified CLI/MCP Agent integration and platform/support-matrix acceptance remain deferred.
 - Authorization: the original design/review scope was renewed by explicit spec-driven authorization for the1600/2000/350 exception, its AGENTS/design record and subsequent ACK/profile gate→WP3→WP4 sequence. No implementation starts before SPEC confirmation; no other feature/platform/dependency or prohibited operation is authorized.
 - Source design: [2026-10-26 design](2026-10-26-ios-wda-observation-design.md), SHA-256 `c447be999e1a32fe2feec9c38438a19e2bd336c03a672839e3f5a266c832373c` before this repair.
 - Baseline: `main`, HEAD `471e56ca29b504007faef17e517ad4ef382b5c01`, initially clean. Current task snapshot: `/tmp/fsq-ios-wp2-audit/manifest.json`; all 39 files and eight complete diff artifacts preserved. No WP3/WP4 code exists.
@@ -37,7 +37,7 @@ All current538 product lines stay in the original-HEAD ledger. Runtime340–440 
 
 ## 4. Original iOS feature remains end-to-end
 
-`IOS-WDA-STANDALONE-01` retains its original HEAD baseline and the newly authorized one-feature cap/serial allocation. WDA Capture, Runtime media1.1 and the sole production Viewer remain one end-to-end behavior; Runtime and Viewer do not become separately “Done” features. Core5/2/12-second safety is not moved into LIFECYCLE-02. Actual WDA/iPhone/forward/Chrome and applicable Android regression are required.
+`IOS-WDA-STANDALONE-01` retains its original HEAD baseline and the newly authorized one-feature cap/serial allocation. WDA Capture, Runtime media1.1 and the sole production Viewer remain one end-to-end behavior; Runtime and Viewer do not become separately “Done” features. Core5/2/12-second safety is not moved into LIFECYCLE-02. Actual WDA/iPhone/forward/Chrome are the standalone gate; the user deferred Android regression to §17 platform completion.
 
 The renewed explicit spec-driven authorization is limited to this original iOS feature and the stated process exception. It requires the ACK/profile SPEC gate before WP3 and WP3 verification/independent review before WP4. Any genuinely new feature/process exception or unapproved dependency still needs its own authorization; real-platform acceptance cannot be substituted with fixtures.
 

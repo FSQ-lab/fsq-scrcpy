@@ -156,3 +156,4 @@ export function decodeMediaHeader(message: Uint8Array): MediaHeader {
   validateHeader(header); if (message.byteLength !== MEDIA_HEADER_BYTES + header.payloadBytes) fail("MediaHeader");
   return header;
 }
+export * from "./control.js";

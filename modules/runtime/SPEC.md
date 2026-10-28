@@ -183,3 +183,174 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - 既有no-store Viewer HTML根元素恰好提供一个经枚举验证的`data-media-profile="h264-annexb"`或`data-media-profile="mjpeg"`属性，供Main在demand前读取。不进入DeviceRef、ViewerDescriptor、URL、bearer或provider locator；既有route/manifest/CSP/Host/Origin/pairing边界不变。精确Main/Worker preflight协议由Viewer同名delta拥有。
 
 
+## macOS Android RuntimeControl v1
+
+本节定义已确认的 `ANDROID-RUNTIME-CONTROL-MACOS-02`；不启用public CLI、wait/watch、Windows、iOS composition或Model Context Protocol。
+
+### Deep interface, authority and operations
+
+- Runtime模块新增：
+
+  ```text
+  acquireRuntime({mode,selector},{signal?})
+    -> Promise<AcquireRuntimeLocalResult>
+
+  AcquireRuntimeLocalResult =
+    {ok:true,session:RuntimeControlSession}
+  | {ok:false,error:ControlError}
+  ```
+
+  `RuntimeControlSession`是client-local object，含serialized-safe `attachment`和普通`control`；`toValue()`只返回`{attachment}`。`close()`/async dispose只关闭该client的keep-alive control sockets与pending local waits，不stop stream或Runtime。Contracts规定的local/serialized enumeration、JSON与inspect边界必须保持。
+- ordinary `control`恰好提供`ensureViewer({signal?})`、`inspect({streamId,afterRevision?},{signal?})`和`stopStream({streamId,expectedRevision?},{signal?})`。composition-root private `RuntimeOwnerControl`另提供`approveViewerPairing({streamId,pairingCode},{signal?})`和`shutdownRuntime({instanceId,generation},{signal?})`；owner methods不挂到ordinary session，不属于serialized值。
+- acquire是唯一auto-binding入口。auto调用已验收Capture resolver；Runtime provider是唯一可调用`revealAndroidBinding`的consumer，并把private binding复制进persistent candidate。known只查已有safe DeviceRef，绝不调用resolver或生成/remap identity。Capture不依赖Runtime，private access不跨provider/client seam。
+- 一个valid persistent slot保存一份32-byte CSPRNG root credential。Runtime按下文HMAC context派生不可互换的client/owner bearer；ordinary session只持有client bearer，owner provider单独持有owner bearer。same-uid malicious process仍是既有out-of-scope；该分权是server-enforced interface authority，不宣称同账号进程隔离。
+
+### Ensure semantic key, ViewerGrant and pairing lifecycle
+
+- 每个Runtime generation由`RuntimeService`持有一个不持久化`EnsureCoordinator`：`empty | active{semanticKey,streamId,descriptor,viewerGrant,grantDeadline}`。`semanticKey`是32-byte CSPRNG的canonical unpadded base64url，只用于既有StateStore idempotency语义，不进入wire/state/log/ordinary inspect。
+- control ensure、stop和terminal observation复用`StateStore.mutex`，不增加第二把产品锁。control ensure必须恰好执行一次`state.mutex.run`；其callback内可生成semantic key，调用不会再次取锁的现有`StateStore.ensureLocked`，并在返回前同步完成`RuntimeService.#newStream`资源初始化和Coordinator publication。禁止持有该mutex时调用会自行`mutex.run`的`RuntimeLifecycle.ensureStandaloneViewer`或`StateStore.ensureStandaloneViewer`；既有in-process public ensure路径保持不变。
+- `active`且stream非terminal时，所有重复、并发或前次response-loss后的ensure都在同一mutex内重用同一semantic key并返回同一StreamId及当前snapshot，不能返回既有idempotency record的initial snapshot。该单次临界区是key创建、StreamId、stream资源与grant owner的唯一线性化点；任何观察者不能看见缺少stream资源或Coordinator的已发布stream。
+- ViewerAccess只在现有60秒owner-grant lifetime内可由相同key重取。monotonic `grantDeadline`到达或in-process ensure返回`unauthorized`时，Coordinator立即丢弃ViewerGrant/access引用；同一active stream的后续ensure固定返回`unauthorized`，不生成新key、不重放或替换secret。
+- terminal snapshot发布时撤销/丢弃grant并标记旧record terminal。下一次ensure在mutex内生成新semantic key，按现有Runtime规则创建新StreamId；若ensure先于并发stop线性化可返回旧active stream，stop先线性化则下一ensure创建新stream。stop重复仍返回同一terminal snapshot。
+- owner approve wire只提交streamId和八字符pairingCode。provider以Coordinator私有ViewerGrant和`RuntimeLifecycle`当前唯一pending pairing identity调用既有`approvePairing`；pairingId/ViewerGrant不跨control seam。pending不存在、stream不匹配、expired/replayed/wrong code统一`unauthorized`；wrong code继续计入既有五次限制，60秒pairing/bootstrap/session规则不变。
+- CSPRNG raw key/grant bytes在base64url编码后`fill(0)`；ECMAScript string、V8 copy、OS cache和storage block不作不可实现的zeroization承诺。到期/terminal/close必须丢引用，并禁止普通序列化、inspect、日志和异常输出。
+
+### Fixed root and persistent slot
+
+- fixed root恰好由`os.userInfo().homedir/Library/Application Support/FSQ_scrcpy`得到；不读`HOME`、cwd、repo或调用方root。root、`devices`、`runtime`为current euid拥有的真实非链接0700目录，文件0600；复用Capture macOS祖先、uid/mode、symlink、dev/inode与same-account attacker out-of-scope规则，不承诺APFS-only或network-home检测。
+- persistent final恰好为`devices/android-only.json`，canonical exact schema/key order为：
+
+  ```text
+  {
+    stateVersion:1,
+    revision:1,
+    platform:"android",
+    deviceRef:DeviceRef,
+    binding:{serial,adbPath,cacheRoot,artifactSource:{mode:"online"}},
+    control:{port,credential},
+    createdAt,
+    updatedAt
+  }
+  ```
+
+  serial/paths/control均owner-private；port为49152..65535 integer；credential是32-byte CSPRNG编码成canonical 43-character unpadded base64url root；首次commit时`createdAt===updatedAt`且为`0..Number.MAX_SAFE_INTEGER` integer Unix ms。本feature不更新或轮换valid slot；rotation/rebind是后续owner recovery feature。
+- 首次auto在任何persistent publication前取得Capture binding。每caller可生成candidate DeviceRef/port/root credential，但只有下述hard-link publication winner可spawn：
+  1. 在validated `devices` directory内以random `.android-only.<canonical-v4-uuid>.tmp`、`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`、mode0600创建同目录temp，完整写canonical bytes，`FileHandle.sync()`，close。root raw Buffer编码后fill；JS string不声称可清零。
+  2. `fs.link(temp,android-only.json)`是唯一create-only linearization。成功后open parent directory并sync；到此winner durable，之后才允许spawn。
+  3. unlink own temp并再次sync parent directory。final存在后，winner可删除严格匹配name、current uid、0600、regular/non-link的stale `.android-only.*.tmp`并再sync；若删除并发candidate，该caller的link得到ENOENT后必须重读/adopt final，不生成第二identity。
+  4. EEXIST loser严格读取、验证final，始终unlink own temp并sync directory。private binding逐字段相同才采用winner；不同返回`device-ambiguous`。ENOENT先重读final：valid final存在则按loser采用，否则重新从新candidate开始，旧candidate不得复用。
+  5. link的EXDEV/EPERM/EOPNOTSUPP或其他非EEXIST/ENOENT失败没有rename fallback。若此刻已有valid final则adopt；否则cleanup own temp、sync directory并返回`local-state-recovery-required`。
+- crash recovery精确为：link前只有temp且不得spawn；下一winner durable publication后sweep stale temp。link后第一次directory sync前，重启只以实际看见且strict-valid的final为准，存在则adopt并补directory sync/cleanup，不存在则重新竞争。第一次directory sync后final durable；temp unlink/第二次sync可幂等补做。任何invalid final都不得自动删除或覆盖，返回`local-state-recovery-required`。
+- control port candidate最多32个CSPRNG值；每个仅临时bind exact`127.0.0.1`并关闭，探测不预留端口。persistent port跨generation稳定，Runtime实际listener bind才是live authority。
+
+### Derived client and owner authority
+
+- slot中的`credential`只作为root material，从不直接上wire。Runtime canonical-decode后必须得到exact32 bytes，随后派生：
+
+  ```text
+  clientBytes = HMAC-SHA-256(rootBytes, UTF8("FSQ-Control/v1/client"))
+  ownerBytes  = HMAC-SHA-256(rootBytes, UTF8("FSQ-Control/v1/owner"))
+  clientBearer = base64url-unpadded(clientBytes)  // exact 43 ASCII chars
+  ownerBearer  = base64url-unpadded(ownerBytes)   // exact 43 ASCII chars
+  ```
+
+  两个context和参数顺序固定，不加NUL、JSON或platform字段；derived raw Buffer在listener/session释放后fill。root/client/owner bearer都不进入argv、env、stdout/stderr、ordinary result或日志。
+- hello、ensure、inspect、stop只接受exact `Authorization: FSQ-Control <clientBearer>`；approve、shutdown只接受exact `Authorization: FSQ-Owner <ownerBearer>`。任一bearer用于另一authority route都固定401。ordinary session只持有clientBearer；owner provider不把ownerBearer交给session。
+
+### Runtime generation filesystem state
+
+- generation final path恰好为`runtime/<deviceRef.opaqueId>.json`；opaqueId已经是canonical v4 UUID。canonical exact schema/key order恰好为：
+
+  ```text
+  {
+    runtimeStateVersion:1,
+    deviceRef,
+    instanceId,
+    generation,
+    port,
+    createdAt,
+    ready:true
+  }
+  ```
+
+  instanceId/generation是每次spawn的independent fresh canonical v4 UUID；port必须等于persistent slot。final不含credential、provider locator或PID，也不允许`ready:false`。pre-ready candidate只存在child memory/bootstrap IPC和同目录temp中。
+- bind winner在control listener成功bind且固定Android Runtime composition/Viewer listener ready后，写exclusive同目录0600 generation temp，file sync、close、rename覆盖generation final、open parent directory并sync；随后在memory设置ready并允许hello success。rename前crash没有ready claim；rename后directory sync前重启可能见old/new final，authenticated hello是liveness authority；directory sync完成后的pair是durable ready generation。
+- valid full final使client hello携带exact expected pair；live response pair不同时不得覆盖，返回`local-state-recovery-required`，关闭ABA。missing/partial generation state使client用`expectedInstance:null` hello；authenticated matching listener返回authoritative pair，client以上述atomic replace+directory sync重建final。
+- listener明确ECONNREFUSED且persistent slot valid时，caller可删除仅由same DeviceRef path标识的partial/stale generation final/temp并sync directory后start。port接受连接但wrong auth/identity/version、connect/header timeout或ownership不确定时，不得删除generation、换port、kill process或remap，返回`local-state-recovery-required`。
+- generation stale temp只在port free，或authenticated matching listener已给出authority时删除并sync。normal shutdown或owned pre-ready cleanup只可compare-and-delete exact `{deviceRef,instanceId,generation,port}` final并sync；old generation cleanup绝不能删除new generation。
+- named secret temp使用unlink+directory sync消除可达副本；不承诺覆写JS string、OS cache或SSD block。所有failure/cancel路径必须settle或清理其owned file handle/temp；不得留下pending filesystem Promise。
+
+### Spawn, bind, ready, attach and ABA state machine
+
+- acquire先读/初始化persistent winner，然后按generation状态执行authenticated hello：full final发送expected pair；missing/partial发送null。attach-only在确证ECONNREFUSED时返回`instance-not-found`且绝不spawn；wrong/uncertain occupied listener返回recovery-required。start-or-attach只有在safe free port时进入spawn。
+- child使用同package fixed absolute Node internal entry、`shell:false`、detached POSIX process group与`stdio:["ignore","ignore","ignore","ipc"]`。argv只含safe DeviceRef；child自行从fixed root读取private slot。secret、serial、path、PID不在argv/env/stdout。bootstrap IPC只允许exact safe frames`candidate|contended|ready|cancel`，不携带credential/provider locator。
+- 状态机：
+  1. `SPAWN_OWNED`：parent拥有pre-ready child/process group；child生成fresh instanceId/generation。
+  2. `CONTROL_BOUND_BOOTING`：child先bind exact stored control port。EADDRINUSE必须在RuntimeService、Viewer和Capture allocation前发送`contended`并退出/reap。bind winner可认证hello；pre-ready hello等待ready或本request deadline，不返回伪authority。
+  3. `RUNTIME_READY`：child构造固定`ScrcpyV501CaptureAdapter`和`RuntimeService`，Viewer/control listener ready；不得因Runtime ready或ensure打开Capture，仍需既有authenticated visible demand。
+  4. `READY_PUBLISHED`：完成generation file rename+directory sync，检查bootstrap IPC仍connected且没有更早cancel，然后memory atomically进入ready并发送ready。此点是唯一readiness/ownership-transfer linearization。之后IPC disconnect/caller cancel/client exit不停止Runtime；child disconnects IPC，parent `unref()`。
+  5. `ATTACHED`：parent必须再做一次authenticated hello并核对exact pair；pair等于其candidate时disposition=`started`，其他matching winner为`attached`。没有authenticated hello不得返回success。
+- parent death/IPC disconnect在READY_PUBLISHED前使child关闭boot listener、删除其matching temp/final并exit；READY_PUBLISHED后忽略parent death。publish后、memory ready前发现IPC已断开时不得transfer ownership，须compare-delete其generation并exit。cancel通过IPC与ready竞赛，禁止parent盲杀可能已ready child。
+- 并发starter中一个child bind成功。EADDRINUSE loser parent在同一10秒readiness budget内每50ms执行authenticated hello；winner ready则返回attached；wrong/uncertain listener立即recovery-required；deadline结束为deadline-exceeded。所有non-winner child必须reap；一个slot最多一个live control listener/Runtime/stream/Capture。
+- owner shutdown request必须target匹配且以owner authority认证。它先线性化`shutting-down`并拒绝新ordinary mutation，走现有stream unified first-cause terminalization，关闭Viewer transport，compare-delete matching generation并directory sync，关闭其他control sockets；向发起者flush 200 shutdown result后关闭最后control socket/listener并exit。
+- shutdown删除generation时old listener仍占port；new starter只有在old listener关闭后才可能bind。old crash留下的stale generation由下一caller在确证port free后删除；old cleanup用compare-delete，不能发生new-generation ABA。
+
+### Six-route exact HTTP/1.1 wire contract
+
+- listener只绑定exact `127.0.0.1:<stored-port>`，独立于Viewer origin。request-target必须origin-form且无query/fragment/percent escape。routes恰好如下；所有request object字段都必须按列出顺序出现，nullable字段不得省略：
+
+| Route | Authority | Exact request body | Success response |
+| --- | --- | --- | --- |
+| `POST /v1/control/hello` | client | `{controlVersion,contractVersion:2,deviceRef,expectedInstance:null|RuntimeTarget}` | HTTP 200 `ControlResult<HelloControlValue>` |
+| `POST /v1/viewer/ensure` | client | `{controlVersion,target:RuntimeTarget}` | HTTP 200 `ControlResult<EnsureViewerValue>` |
+| `POST /v1/stream/inspect` | client | `{controlVersion,target,streamId,afterRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<InspectControlValue>` |
+| `POST /v1/stream/stop` | client | `{controlVersion,target,streamId,expectedRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<StopStreamValue>`；revision mismatch HTTP 409 exact snapshot-bearing branch |
+| `POST /v1/viewer/approve` | owner | `{controlVersion,target,streamId,pairingCode}` | HTTP 200 `ControlResult<ApproveViewerValue>` |
+| `POST /v1/runtime/shutdown` | owner | `{controlVersion,target}` | HTTP 200 `ControlResult<ShutdownRuntimeValue>`后按shutdown顺序exit |
+
+- hello的`expectedInstance:null`只用于generation final missing/partial；server仍核对controlVersion、contractVersion和exact DeviceRef，并只在auth与Runtime ready后返回authoritative RuntimeInstance。full final必须发送pair并同时匹配instanceId/generation；任何单字段或pair mismatch fail closed。minor0 `features`恰好`[]`。
+- every non-hello request携带RuntimeTarget；server在operation dispatch前重新核对。旧generation bearer即使root相同也不能让旧request作用于新Runtime。route允许的operation error集合为：hello `control-version-mismatch|instance-conflict|malformed-control|runtime-exited|runtime-overload`；ensure另含`unauthorized`；inspect无unauthorized；stop另含`revision-conflict`；approve另含`unauthorized`；shutdown无unauthorized application branch。所有route均可在transport/lifecycle层产生deadline-exceeded或runtime-exited。
+- authenticated application failure使用Contracts表HTTP status与canonical `ControlResult`；revision-conflict使用其唯一branch。unknown authenticated route为404 `{"error":"not-found"}`；wrong method或OPTIONS为405 `{"error":"method-not-allowed"}`。所有body response固定`Content-Type: application/json; charset=utf-8`、exact decimal Content-Length、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`；不发送CORS、redirect或authority echo。
+- `Content-Type`必须exact `application/json; charset=utf-8`；恰好一个canonical decimal Content-Length，值与bytes相同且0..16384；拒绝Transfer-Encoding。wrong content type为415 `{"error":"unsupported-media-type"}`；missing/duplicate/invalid length、premature EOF、noncanonical body为400，oversize为413。header/body deadline在仍可写时为408 `{"error":"request-timeout"}`，否则destroy。transport error JSON同样canonical和fixed safe，不含ControlError identity evidence。
+
+### Auth-first parsing and bounded sockets
+
+- Node HTTP server固定`maxHeaderSize:8192`、`maxHeadersCount:32`、`headersTimeout:5000`、`requestTimeout:5000`。另外在raw TCP accept层维护最多8个尚未成功认证的pre-auth sockets；第9个立即destroy，不创建request body或large object。accept到完整首headers最多5000 monotonic ms。
+- auth顺序固定且先于route/body/identity：
+  1. HTTP parser只执行8KiB/32-header/deadline/framing hard cap，不查route、body、DeviceRef或generation。
+  2. 从raw headers大小写不敏感地要求exactly one Host和exactly one Authorization；duplicate/missing均失败。Host必须exact `127.0.0.1:<stored-port>`。任何Origin、OPTIONS、`Forwarded`、`Via`、`X-Forwarded-*`、proxy-auth、absolute-form、redirect/proxy环境只有在auth成功后才按malformed transport拒绝，避免形成auth oracle。
+  3. Authorization必须无前后OWS并匹配exact scheme/token。candidate必须canonical 43-char base64url并decode exact32 bytes；非法candidate改用fixed32-byte dummy。server对client expected和owner expected各执行一次`timingSafeEqual`，然后fill candidate/dummy；外层代码也不得按token prefix/length产生不同body。
+  4. Host或auth任一失败共享HTTP 401、`{"error":"unauthorized"}`、`Connection: close`，并在查route/body/instance/device前结束。
+  5. auth成功后才检查authority允许的route、browser/proxy headers、method/content headers/body和业务identity。client bearer访问owner route、owner bearer访问ordinary route固定401，不以403/404区分。
+- 成功认证首request时socket从pre-auth pool原子转入最多8个authenticated keep-alive sockets；第9个认证成功的socket返回429 canonical runtime-overload并close。socket绑定首次认证的authority class，后续request必须重复相同exact credential；keep-alive idle/后续header deadline均5000ms，每socket最多64个requests。
+- 每socket最多一个in-flight request，全局client+owner最多8个ordinary in-flight；pipeline或第9个返回429并`Connection: close`，且不得分配large body/history。close/error/clientError/timeout/finally必须恰好一次释放pre-auth/authenticated/in-flight计数。control listener没有WebSocket、media、perMessage、Viewer asset或CORS surface。
+
+### Deadlines, cancellation and result reconciliation
+
+所有deadline用monotonic clock；serialized wall time不能延长它们：
+
+| Scope | Exact deadline |
+| --- | --- |
+| accepted socket/header/keep-alive | 5000ms |
+| request body | 2000ms read-idle，且headers complete后5000ms total |
+| client TCP connect attempt | 1000ms |
+| one authenticated request/response | connect成功后5000ms total；response body read-idle 2000ms且受total约束 |
+| spawn-to-authenticated-readiness | child spawn成功后10000ms total |
+| EADDRINUSE loser attach retry | 每50ms，单次connect/request截断到剩余readiness budget |
+| owned pre-ready child escalation | TERM后2000ms；仍未exit则KILL并reap |
+
+- exact request shape/canonical bytes在业务I/O前验证；auth framing例外只执行上述fixed bounded work。pre-aborted合法local options在persistent mutation/spawn前返回request-cancelled/not-applied。
+- slot publish前cancel清理own candidate temp。slot已经durable publish不是要回滚的operation side effect，可保留winner；若尚未spawn仍返回request-cancelled。spawn后ready前cancel通过bootstrap IPC：cancel先于ready且child确认则关闭listener、TERM→2s→KILL如需并reap；ready先线性化则Runtime保持persistent，parent完成hello并返回success，不能杀ready child。
+- read-only request dispatch后cancel可关闭本地socket；未取得权威response时返回deadline-exceeded/unknown，不声称not-applied。ensure/approve/stop/shutdown在各自mutex/状态转换前观察cancel为request-cancelled；线性化后operation继续，若response丢失/超时则client返回deadline-exceeded/unknown。
+- stop线性化后不能由cancel撤销。lost ensure以同selector重新acquire并重放generation semantic key；stop以inspect协调；startup/shutdown以authenticated hello/attach协调。approve线性化后若响应丢失，结果保持`deadline-exceeded/state-unknown`：ordinary inspect不得推断approval结果，client不得自动重放pairing code；只能由当前浏览器配对流程后续成功/失效或新的owner pairing attempt观察。不得因client取消/退出而stop stream或ready Runtime。
+- child exit、EPIPE、ECONNRESET、filesystem和Capture raw error不进入safe result；按Contracts fixed mapping。所有pending HTTP/child/file/timer在return前settle、清理或明确转移给ready Runtime。
+
+### Cleanup, privacy and verification
+
+- first-cause stream terminalization、Capture cleanup、Viewer grant/session revoke和END行为沿用现有Runtime contract。`stopStream`只停流，Runtime/control listener保持；shutdown才停进程。FSQ从不停止用户global ADB server、Appium Session或外部非owned process。
+- ordinary JSON/string/inspect/log/error及未来Adapter输出不得含binding、serial/path、root/client/owner credential、semantic key、ViewerGrant、pairingId、cookie、PID、raw exception或media。diagnostics只允许bounded safe operation/outcome/phase，不记录request headers/body或private state。
+- contract suite必须覆盖：local/serialized session枚举；六route canonical bytes与status；client/owner bearer不可互换；ensure concurrent/retry/response-loss/grant expiry/terminal key rotation；control ensure只取得一次mutex、不会重入死锁且成功返回前已有完整stream resources与Coordinator；approve响应丢失固定state-unknown、ordinary inspect不推断且client不重放code；每个ControlError唯一tuple；pre/post-linearization cancel；16/17 changes、12288和16384 byte边界。
+- filesystem fault tests在每个write/file-sync/close/link/directory-sync/unlink/rename后模拟crash，覆盖EEXIST/ENOENT/EXDEV/EPERM、多stale secret temp、generation missing/partial/full与free/matching/wrong-auth port；恢复后最多一个canonical slot，named secret temp删除，old generation不能删除new generation。
+- process tests用deterministic clock覆盖winner bind-before-ready、loser EADDRINUSE、parent death与cancel在READY_PUBLISHED两侧、TERM/KILL/reap、response loss、shutdown/new starter race；任何路径最多一个authenticated Runtime，所有non-winner child reaped，ready/ensure在visible demand前Capture.open计数为0。
+- HTTP tests覆盖8/9 slow pre-auth raw sockets、8/9 authenticated keep-alive sockets、8/9 in-flight、pipeline、5秒header/body/idle、64/65 requests/socket、duplicate Host/Auth、invalid token、wrong authority与计数异常close归零；auth失败不得触发route/body/identity parser。
+- 真实macOS arm64/USB Android入口使用temporary RuntimeControl client：并发fresh start/attach只一个ready pair和Runtime；ordinary bearer实测owner route 401；真实Viewer Live；client退出后attach得到同一StreamId；stop只停流；ensure/stop response-loss后可按各自契约协调而approve response-loss保持state-unknown且不重放；owner shutdown清理matching generation；shutdown并发starter不能遭old cleanup ABA；输出/state scan无serial/path/credential/grant/frame。该feature通过不代表CLI/MCP/Windows/iOS或support matrix。

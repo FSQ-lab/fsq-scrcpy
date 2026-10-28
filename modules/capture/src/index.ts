@@ -8,6 +8,17 @@ export { validateDeviceRef, validateSize, validateStreamError } from "../../cont
 export type { DeviceRef, Size, StreamError, StreamErrorCode } from "../../contracts/src/index.js";
 export * from "./session.js";
 export { WdaMjpegCaptureAdapter } from "./wda/adapter.js";
+export {
+  resolveSingleAndroidBinding,
+  revealAndroidBinding,
+  type AndroidBindingAccess,
+  type AndroidBindingError,
+  type AndroidBindingErrorCode,
+  type AndroidBindingOptions,
+  type AndroidBindingResult,
+  type AndroidBindingSnapshot,
+  type ResolvedAndroidBinding,
+} from "./android/binding.js";
 
 export interface OpenCaptureRequest { readonly deviceRef: DeviceRef }
 export interface CaptureSource { open(request: OpenCaptureRequest, cancellation?: AbortSignal): Promise<CaptureSession> }

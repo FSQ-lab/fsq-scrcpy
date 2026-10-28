@@ -96,3 +96,24 @@ Appium_connect_agent Adapter ───────► Runtime public interface
 - 帧只在内存；WDA endpoint、UDID、Session ID、provider locator/error 不进入公共契约、日志、模型输出或 Viewer URL。浏览器只连接受保护 FSQ origin。
 - 详细契约由四个模块 SPEC 的同名契约定义；既有 loopback、pairing、capability、Host/Origin、CSP、五秒 Viewer grace、first-cause terminalization 和 Android 约束保持有效。
 
+## macOS Android Automatic Binding Contract
+
+本节只覆盖 `ANDROID-AUTO-BINDING-MACOS-01`。RuntimeControl、持久本机状态、CLI、Windows、iOS binding 与 Model Context Protocol 均不由本节预建。
+
+- 平台组合为本地 macOS arm64、恰好一台已通过USB连接并授权的Android设备及现有 `ScrcpyV501CaptureAdapter`；当前Android真实Capture/Viewer/rotation/performance/grace/cleanup回归已通过，但支持矩阵保持为空。
+- Capture模块新增零手工配置的owner-private Android binding resolver：从当前进程PATH解析既有Android Debug Bridge，要求设备列表恰好一行且state=`device`，复用固定在线scrcpy-server v5.0.1私有缓存策略，并返回不普通序列化的私有binding access。
+- resolver不生成公共 `DeviceRef`、不启动Capture、push/reverse/shell/server或Viewer，不保存设备映射，不建立监听器。Runtime后续feature才负责把私有binding与自动本机状态组合。
+- Android serial、路径、artifact locator/client对象不进入Contracts、安全snapshot、普通结果、日志、模型上下文、URL或遥测。详细interface、错误、限制、取消与验收由Capture同名contract拥有。
+- Runtime/Contracts/Viewer对本feature no-delta；后续feature只能经另行确认的SPEC delta消费该owner-private access。
+
+## macOS Android RuntimeControl v1
+
+本节覆盖已确认的 `ANDROID-RUNTIME-CONTROL-MACOS-02`；CLI、wait/watch、Windows、iOS RuntimeControl 与 Model Context Protocol 均不由本节预建。
+
+- 平台组合为本地macOS arm64、`ANDROID-AUTO-BINDING-MACOS-01`已验收的恰好一台USB Android设备、一个persistent Runtime/stream/Viewer。Runtime客户端退出不停止Runtime；只有持有独立owner authority且显式请求shutdown才停止进程。
+- 新增独立于Viewer origin、绑定exact `127.0.0.1`的HTTP/1.1 JSON control listener，以及一个深的provider-neutral RuntimeControl client/provider seam；control面不传媒体、不接触Capture/Viewer内部对象。
+- `selector:auto/android`通过Capture owner-private resolver原子生成或复用安全DeviceRef和私有本机状态；`selector:known`只连接既有identity。并发首次启动只有一个crash-durable persistent slot、一个control listener和一个Runtime generation成为authority。
+- stable root credential只存在owner-private slot；Runtime以HMAC-SHA-256派生不可互换的client与owner bearer。普通attached session只有ensure/inspect/stop authority；approve pairing与Runtime shutdown必须使用独立owner authority。
+- Agent-safe结果只含Contracts-owned control值、`ViewerDescriptor`与`StreamSnapshot`；Android serial、路径、artifact locator、root/client/owner credential、ViewerGrant、pairingId、PID和原异常不进入普通结果、日志、URL、模型上下文或遥测。
+- 本feature支持acquire/start-or-attach、ensure、inspect、stop stream、owner pairing approval和owner Runtime shutdown；不支持wait/watch、state维护命令、远程、多个设备/流/Viewer或Model Context Protocol。
+- Contracts/Runtime同名契约固定wire schema、canonical bytes、认证顺序、semantic ensure key/grant生命周期、错误tuple/deadline、crash-durable filesystem状态、spawn/bind/ready/attach与ABA规则。Capture/Viewer行为no-delta。
