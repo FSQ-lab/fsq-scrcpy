@@ -9,6 +9,13 @@ export type { DeviceRef, Size, StreamError, StreamErrorCode } from "../../contra
 export * from "./session.js";
 export { WdaMjpegCaptureAdapter } from "./wda/adapter.js";
 export {
+  createIosWdaCaptureSource,
+  resolveSingleIosWdaBinding,
+  type IosWdaBindingAccess,
+  type IosWdaBindingSnapshot,
+  type IosWdaCaptureSourceInput,
+} from "./wda/binding.js";
+export {
   resolveSingleAndroidBinding,
   revealAndroidBinding,
   type AndroidBindingAccess,

@@ -153,3 +153,28 @@ Session precedes frames. Each epoch contains exactly one normalized `CodecConfig
 - fake Android Debug Bridge断言命令集合恰好为version、devices -l、目标serial get-state；任何shell/push/reverse/kill-server调用使测试失败。resolver完成后无owned child/lock/socket残留。
 - 真实macOS arm64/USB Android验收记录Android Debug Bridge与artifact安全版本信息、恰好一台authorized设备、resolver成功与重复成功、零普通locator泄漏，并证明调用前后没有新增reverse、remote artifact、Capture session、Viewer或设备设置变化。该验收不替代已完成的Android standalone回归，也不形成Agent/Windows/platform支持声明。
 
+## Automatic Single iOS WDA Binding v1
+
+本节定义 `IOS-AUTO-BINDING-MACOS-09`。它新增一个确定性的 owner-private logical-slot binding，不修改 `CaptureSource`、`WdaMjpegCaptureAdapter`、serialized values 或已验收的 WDA media grammar。
+
+### Interface and exact values
+
+- Capture 导出 `resolveSingleIosWdaBinding(): IosWdaBindingAccess` 与 `createIosWdaCaptureSource(input): CaptureSource`。resolver 只接受零参数、同步、确定性且零 I/O；JavaScript runtime 传入任何参数时，在构造值前同步抛出 `TypeError("Invalid iOS WDA binding options")`。
+- `IosWdaBindingSnapshot` 为深冻结 exact value `{bindingVersion:1,platform:"ios",provider:"wda-mjpeg-v16.15.3",slot:"loopback-9100"}`，key order 同此顺序；不含 DeviceRef、endpoint、port、UDID、Session ID、process/forward handle、path、credential、timestamp 或 mutable provider object。
+- `IosWdaBindingAccess` 为冻结的 branded class instance。`Reflect.ownKeys(access)` 恰为 `["snapshot"]`；`snapshot` 是唯一 own property，不含 own symbol 或 non-enumerable extension key。`toJSON()` 恰返回 `{snapshot}`。`String(access)`、default-hint primitive conversion 及启用 custom inspection 的默认 `util.inspect` 返回 `[REDACTED]`；`Number(access)` 为 `NaN`。`customInspect:false` 最多可显示 safe snapshot，不得显示 endpoint、port、UDID、Session ID 或 private resolved state。
+- `createIosWdaCaptureSource` 只接受 key order 为 `access,deviceRef` 的 exact plain input。access 必须由本模块创建；deviceRef 必须为 exact v2 iOS DeviceRef。foreign/forged/cloned/prototype-only access、错误 platform/version/identity shape、错误 prototype/key order 或额外/缺失字段同步抛出 `TypeError("Invalid iOS WDA capture source input")` 且零 I/O。合法调用以 DeviceRef defensive copy 与 source constant `http://127.0.0.1:9100/` 私下构造现有 `WdaMjpegCaptureAdapter`，只按 `CaptureSource` 返回且不打开 source。
+- 重复 resolution 返回不同 branded wrapper，但 snapshot deep-equal。wrapper identity 不是 device identity；exact snapshot `slot` 是 stable logical-slot identity，外部 owner repoint forward 时不变。
+
+### Fixed policy, ownership and privacy
+
+- endpoint 是 source constant，不是配置。resolution 不读取 argv、environment（`FSQ_*`、WDA、Appium、proxy 或 HOME）、repository/cwd file、user state、keychain、process table、USB registry 或 network state；不存在 custom endpoint、port、path、provider、fallback、discovery 或 registry input。
+- resolution 不测试 port 9100、不创建 socket/request、不实例化或打开 `WdaMjpegCaptureAdapter`、不分配 CaptureSession、不解析 HTTP/JPEG、不启动 Runtime/Viewer。missing、wrong 或 repointed forward 在 resolution 时故意不可区分；既有 demand-time WDA `open` 按 iOS standalone contract 映射 availability/media failure。
+- WDA v16.15.3、loopback forward 与物理 iPhone 由外部 owner 管理；resolution/source construction 没有 FSQ cleanup。后续 Feature10 的 trusted Integrations package composition root 可以持有 opaque access 与 safe DeviceRef、调用 `createIosWdaCaptureSource`，再仅把返回的 platform-neutral CaptureSource 交给既有 Runtime composition path。endpoint 在 Capture 内组装和保留；Integrations 不取得 reveal function 或 endpoint value，RuntimeControl 不变，CLI/MCP/Agent、Contracts、ordinary result、application log、Runtime inspect output、argv、URL 与 telemetry 不得取得 access 或输出 snapshot/locator。唯一 inspection 例外是直接内部 Node `util.inspect(access,{customInspect:false})`，最多显示上述 safe snapshot，且不是 application logging/output seam。
+- 本 feature 不新增 dependency 或 public/serialized error，不改变 Android binding、global ADB、WDA media parsing、source lifecycle、DeviceRef semantics 或 support claim。
+
+### Verification and real acceptance
+
+- contract tests 覆盖 exact zero-argument enforcement、snapshot key order/冻结/深不可变、distinct-wrapper/same-slot、exact `Reflect.ownKeys`、无 own symbol/extension、fixed JSON/string/default/number/default-inspect、safe `customInspect:false`、exact source-factory input/key order、unique brand、forged/cloned/prototype rejection、完整 iOS DeviceRef validation，以及每个 ordinary observation/fixed error 均无 endpoint/port/UDID/Session/provider locator。
+- side-effect tests instrument filesystem、child process、environment-derived configuration、DNS、TCP/HTTP 与 Capture open seams，证明 resolution 和合法/非法 source construction 均不调用这些 seam。合法 factory result 是既有 CaptureSource，仅在其既有 `open` 后访问 source；Android resolver 与 WDA Adapter 全量回归保持通过。
+- 真实 macOS arm64 验收使用 iOS standalone contract 已要求且已有固定版本证据的 owner-managed WDA v16.15.3 与 fixed loopback forward：以连接/request observation 证明重复 resolution 与 source construction 均为零 source I/O；opaque access 与 safe iOS DeviceRef 生成的 CaptureSource 只在后续 demand-time open 访问 fixed owner-managed source；以 cancellation 关闭 FSQ session 后连接回到原基线，随后新的 explicit open 再次收到真实 WDA JPEG，证明外部 WDA/forward 仍由 owner 存活。每次 connection replacement 前后 logical-slot snapshot 必须相同。由于本 Feature 按契约不观察 physical target、UDID、Session 或 forward ownership，实际将 forward 改指另一物理 iPhone 不产生额外 FSQ 可观察证据，不是 Feature09 验收要求；physical automation/video target correlation 仍属于后续 cross-project integration。ordinary output 不得含 endpoint/UDID/Session identity。该验收不构成 Runtime/CLI/MCP 或 platform support claim。
+

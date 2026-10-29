@@ -109,6 +109,14 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - Android serial、路径、artifact locator/client对象不进入Contracts、安全snapshot、普通结果、日志、模型上下文、URL或遥测。详细interface、错误、限制、取消与验收由Capture同名contract拥有。
 - Runtime/Contracts/Viewer对本feature no-delta；后续feature只能经另行确认的SPEC delta消费该owner-private access。
 
+## macOS iOS WDA Automatic Binding Contract
+
+- 本节只覆盖 `IOS-AUTO-BINDING-MACOS-09`：本地 macOS arm64、外部 owner 已将 WDA v16.15.3 MJPEG 固定转发到 loopback slot `127.0.0.1:9100`，以及一个 Capture-owned owner-private binding resolver。支持矩阵保持为空。
+- resolver 表示当前 macOS 账户的单一 iOS logical video slot，不识别或证明物理 iPhone。外部 owner 将 forward 指向另一台 iPhone 时 slot identity 保持；自动化与视频目标的物理一致性属于后续跨项目 integration 验收。
+- FSQ 不检查 USB device、UDID、WDA/Appium Session identity 或 forward ownership；不安装、签名、启动、停止、配置或修复 WDA；不创建、检查或管理 forward；不发送 WebDriver、Settings 或设备控制命令。
+- resolution 不执行 filesystem、process、environment、socket、HTTP、DNS、proxy、USB 或 Capture-source I/O；不创建 DeviceRef、不打开 WDA MJPEG、不启动 Runtime/Viewer、不持久化状态、不暴露 endpoint。WDA/forward availability 仍由已验收 iOS standalone contract 的 demand-time Capture 行为判定。
+- 仅 Capture 变化。Contracts、Runtime、Viewer、Integrations no-delta；CLI、MCP、RuntimeControl、Appium integration、多 slot、second-source detection、physical identity 与 platform/support claim 均不在范围内。
+
 ## macOS Android RuntimeControl v1
 
 本节最初定义 `ANDROID-RUNTIME-CONTROL-MACOS-02`；下方已确认的`ANDROID-CONTROL-WAIT-MACOS-04`只扩展ordinary provider wait。CLI wait/watch、Windows、iOS RuntimeControl与Model Context Protocol仍未启用。
