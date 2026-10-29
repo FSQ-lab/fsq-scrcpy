@@ -16,7 +16,7 @@ export const CONTROL_VERSION = Object.freeze({ major: 1 as const, minor: 0 as co
 export type ControlVersion = Readonly<{ major: 1; minor: 0 }>;
 export type RuntimeTarget = Readonly<{ instanceId: string; generation: string }>;
 export type DeviceSelector = Readonly<{ kind: "auto"; platform: "android" }> | Readonly<{ kind: "known"; deviceRef: DeviceRef }>;
-export type RuntimeInstance = Readonly<{ controlVersion: ControlVersion; instanceId: string; generation: string; contractVersion: 2; deviceRef: DeviceRef; features: readonly ["wait-v1"] }>;
+export type RuntimeInstance = Readonly<{ controlVersion: ControlVersion; instanceId: string; generation: string; contractVersion: 2; deviceRef: DeviceRef; features: readonly ["wait-v1", "auto-bootstrap-v1"] }>;
 export type RuntimeAttachment = Readonly<{ disposition: "started" | "attached"; instance: RuntimeInstance }>;
 export type AcquireRuntimeRequest = Readonly<{ mode: "attach-only" | "start-or-attach"; selector: DeviceSelector }>;
 export type WaitControlRequest = Readonly<{ streamId: StreamId; afterRevision: number; waitMs: number }>;
@@ -26,9 +26,8 @@ export type HelloControlValue = Readonly<{ instance: RuntimeInstance }>;
 export type EnsureViewerValue = Readonly<{ deviceRef: DeviceRef; descriptor: ViewerDescriptor; snapshot: StreamSnapshot }>;
 export type InspectControlValue = Readonly<{ snapshot: StreamSnapshot; changes: readonly StreamSnapshot[]; reset: boolean; timedOut: boolean }>;
 export type StopStreamValue = Readonly<{ snapshot: StreamSnapshot }>;
-export type ApproveViewerValue = Readonly<{ snapshot: StreamSnapshot; approvedAt: number }>;
 export type ShutdownRuntimeValue = Readonly<{ instanceId: string; generation: string }>;
-export type ControlWireValue = AcquireRuntimeValue | HelloControlValue | EnsureViewerValue | InspectControlValue | StopStreamValue | ApproveViewerValue | ShutdownRuntimeValue;
+export type ControlWireValue = AcquireRuntimeValue | HelloControlValue | EnsureViewerValue | InspectControlValue | StopStreamValue | ShutdownRuntimeValue;
 export type ControlErrorCode = keyof typeof CONTROL_ERRORS;
 export type ControlError = Readonly<{ controlVersion: ControlVersion; code: ControlErrorCode; disposition: "recoverable" | "terminal" | "state-unknown"; operationState: "not-applied" | "unknown"; safeMessage: string }>;
 export type RevisionConflictError = Readonly<{ controlVersion: ControlVersion; code: "revision-conflict"; disposition: "recoverable"; operationState: "not-applied"; safeMessage: "The expected revision does not match." }>;
@@ -39,7 +38,6 @@ export const CONTROL_ERRORS = Object.freeze({
   "instance-not-found": ["recoverable", "not-applied", "No matching Runtime is available.", 404],
   "instance-conflict": ["terminal", "not-applied", "The Runtime identity does not match.", 409],
   "control-version-mismatch": ["terminal", "not-applied", "The RuntimeControl version is incompatible.", 409],
-  unauthorized: ["terminal", "not-applied", "Authorization failed.", 401],
   "malformed-control": ["terminal", "not-applied", "The control request is invalid.", 400],
   "deadline-exceeded": ["state-unknown", "unknown", "The control operation deadline was exceeded; its outcome is unknown.", 504],
   "request-cancelled": ["recoverable", "not-applied", "The control request was cancelled before it was applied.", 499],
@@ -78,7 +76,7 @@ export function validateAcquireRuntimeRequest(value: unknown): AcquireRuntimeReq
 export function validateWaitControlRequest(value: unknown): WaitControlRequest { const v = exact(value, ["streamId", "afterRevision", "waitMs"]); validateStreamId(v.streamId); safeInteger(v.afterRevision, 1); if (safeInteger(v.waitMs) > 30_000) fail(); return value as WaitControlRequest; }
 export function validateWaitControlWireRequest(value: unknown): WaitControlWireRequest { const v = exact(value, ["controlVersion", "target", "streamId", "afterRevision", "waitMs"]); validateControlVersion(v.controlVersion); validateRuntimeTarget(v.target); validateWaitControlRequest({ streamId: v.streamId, afterRevision: v.afterRevision, waitMs: v.waitMs }); return value as WaitControlWireRequest; }
 export function validateRuntimeInstance(value: unknown): RuntimeInstance {
-  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 2 || v.features.length !== 1 || v.features[0] !== "wait-v1") fail(); const descriptor = Object.getOwnPropertyDescriptor(v.features, "0"); if (!descriptor?.enumerable || !("value" in descriptor)) fail(); const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") fail(); return value as RuntimeInstance;
+  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 3 || v.features.length !== 2 || v.features[0] !== "wait-v1" || v.features[1] !== "auto-bootstrap-v1") fail(); for (const key of ["0", "1"]) { const descriptor = Object.getOwnPropertyDescriptor(v.features, key); if (!descriptor?.enumerable || !("value" in descriptor)) fail(); } const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") fail(); return value as RuntimeInstance;
 }
 export function validateRuntimeAttachment(value: unknown): RuntimeAttachment { const v = exact(value, ["disposition", "instance"]); if (v.disposition !== "started" && v.disposition !== "attached") fail(); validateRuntimeInstance(v.instance); return value as RuntimeAttachment; }
 export function validateControlError(value: unknown): ControlError {
@@ -104,7 +102,6 @@ export function validateControlWireValue(value: unknown): ControlWireValue {
     if ((changes.length > 0 && revision !== snapshot.revision) || typeof object.reset !== "boolean" || typeof object.timedOut !== "boolean" || (object.reset && (changes.length !== 0 || object.timedOut)) || (object.timedOut && (changes.length !== 0 || object.reset))) return fail(); return object as InspectControlValue;
   }
   if (has(["snapshot"])) { validateStreamSnapshot(object.snapshot); return object as StopStreamValue; }
-  if (has(["snapshot", "approvedAt"])) { validateStreamSnapshot(object.snapshot); safeInteger(object.approvedAt); return object as ApproveViewerValue; }
   if (has(["instanceId", "generation"])) { validateStreamId(object.instanceId); validateStreamId(object.generation); return object as ShutdownRuntimeValue; }
   return fail();
 }
@@ -122,7 +119,6 @@ export function validateEnsureViewerValue(value: unknown): EnsureViewerValue { c
 export function validateInspectControlValue(value: unknown): InspectControlValue { const checked = validateControlWireValue(value); return isInspectControlValue(checked) ? checked : fail(); }
 export function validateStopStreamValue(value: unknown): StopStreamValue { const checked = validateControlWireValue(value); return isStopStreamValue(checked) ? checked : fail(); }
 export function validateHelloControlValue(value: unknown): HelloControlValue { const object=exact(value,["instance"]);validateRuntimeInstance(object.instance);return object as HelloControlValue; }
-export function validateApproveViewerValue(value: unknown): ApproveViewerValue { const object=exact(value,["snapshot","approvedAt"]);validateStreamSnapshot(object.snapshot);safeInteger(object.approvedAt);return object as ApproveViewerValue; }
 export function validateShutdownRuntimeValue(value: unknown): ShutdownRuntimeValue { const object=exact(value,["instanceId","generation"]);validateRuntimeTarget(object);return object as ShutdownRuntimeValue; }
 
 const ORDERS = [
@@ -130,12 +126,12 @@ const ORDERS = [
   ["major", "minor"], ["instanceId", "generation"], ["contractVersion", "platform", "namespace", "opaqueId"],
   ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"], ["disposition", "instance"],
   ["controlVersion", "code", "disposition", "operationState", "safeMessage"], ["descriptor"], ["attachment"], ["instance"],
-  ["deviceRef", "descriptor", "snapshot"], ["snapshot", "changes", "reset", "timedOut"], ["snapshot"], ["snapshot", "approvedAt"],
+  ["deviceRef", "descriptor", "snapshot"], ["snapshot", "changes", "reset", "timedOut"], ["snapshot"],
   ["streamId", "deviceRef", "revision", "phase", "reason", "epoch", "codedSize", "displaySize", "activeViewerCount", "updatedAt"],
   ["width", "height"], ["contractVersion", "streamId", "standaloneUri", "presentationModes", "expiresAt"],
   ["controlVersion", "contractVersion", "deviceRef", "expectedInstance"], ["controlVersion", "target"],
   ["controlVersion", "target", "streamId", "afterRevision"], ["controlVersion", "target", "streamId", "afterRevision", "waitMs"], ["controlVersion", "target", "streamId", "expectedRevision"],
-  ["controlVersion", "target", "streamId", "pairingCode"], ["streamId", "afterRevision", "waitMs"], ["kind", "platform"], ["kind", "deviceRef"], ["mode", "selector"],
+  ["streamId", "afterRevision", "waitMs"], ["kind", "platform"], ["kind", "deviceRef"], ["mode", "selector"],
 ] as const;
 function orderFor(keys: readonly string[]): readonly string[] {
   for (const order of ORDERS) { const candidate: readonly string[] = order; if (keys.every((key) => candidate.includes(key)) && candidate.filter((key) => keys.includes(key)).length === keys.length) return candidate.filter((key) => keys.includes(key)); }
@@ -181,4 +177,4 @@ export class RuntimeControlSession implements AsyncDisposable {
   [Symbol.asyncDispose](): Promise<void> { return this.close(); }
 }
 Object.defineProperty(RuntimeControlSession.prototype, inspect.custom, { value(this: RuntimeControlSession) { return this.toValue(); } });
-function deepFreezeAttachment(value: RuntimeAttachment): RuntimeAttachment { const deviceRef = frozen({ ...value.instance.deviceRef }); const controlVersion = frozen({ ...value.instance.controlVersion }); const features = Object.freeze(["wait-v1"] as const); const instance = frozen({ ...value.instance, controlVersion, deviceRef, features }); return frozen({ disposition: value.disposition, instance }); }
+function deepFreezeAttachment(value: RuntimeAttachment): RuntimeAttachment { const deviceRef = frozen({ ...value.instance.deviceRef }); const controlVersion = frozen({ ...value.instance.controlVersion }); const features = Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const); const instance = frozen({ ...value.instance, controlVersion, deviceRef, features }); return frozen({ disposition: value.disposition, instance }); }

@@ -120,33 +120,6 @@ export function validateStreamSnapshot(value) {
         fail("StreamSnapshot");
     return value;
 }
-const GRANT = /^[A-Za-z0-9_-]{22,2048}$/;
-const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-class Grant {
-    #raw;
-    constructor(raw) { this.#raw = raw; Object.freeze(this); }
-    static reveal(grant) { return grant.#raw; }
-    toString() { return "[REDACTED]"; }
-    toJSON() { return "[REDACTED]"; }
-    [Symbol.toPrimitive]() { return "[REDACTED]"; }
-}
-Object.defineProperty(Grant.prototype, Symbol.for("nodejs.util.inspect.custom"), { value: () => "[REDACTED]" });
-export function createViewerAccess(descriptorValue, rawGrant) {
-    const source = validateViewerDescriptor(descriptorValue);
-    if (typeof rawGrant !== "string" || !GRANT.test(rawGrant) || rawGrant.length % 4 === 1)
-        fail("ViewerGrant");
-    const grant = rawGrant, remainder = grant.length % 4, tail = ALPHABET.indexOf(grant.at(-1) ?? "");
-    if ((remainder === 2 && (tail & 15) !== 0) || (remainder === 3 && (tail & 3) !== 0))
-        fail("ViewerGrant");
-    const descriptor = Object.freeze({ ...source, presentationModes: Object.freeze(["standalone"]) });
-    const access = Object.defineProperties({ descriptor }, {
-        viewerGrant: { value: new Grant(grant), enumerable: false },
-        toJSON: { value: () => ({ descriptor }), enumerable: false },
-        [Symbol.for("nodejs.util.inspect.custom")]: { value: () => ({ descriptor, viewerGrant: "[REDACTED]" }), enumerable: false }
-    });
-    return Object.freeze(access);
-}
-export function revealViewerGrant(grant) { return Grant.reveal(grant); }
 export const MEDIA_MAJOR = 1, MEDIA_HEADER_BYTES = 40;
 export const MAX_PAYLOAD_BYTES = 8_388_608, MAX_CONFIG_BYTES = 262_144, MAX_FRAME_BYTES = 8_126_464;
 export const MEDIA_KIND = Object.freeze({ session: 1, config: 2, frame: 3, gap: 4, end: 5 });

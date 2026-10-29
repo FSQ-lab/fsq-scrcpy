@@ -1,17 +1,9 @@
 import {
   controlError,
-  validateApproveViewerValue,
-  validateControlError,
   validateControlResult,
-  validateEnsureViewerValue,
-  validateInspectControlValue,
-  validateRuntimeAttachment,
   validateShutdownRuntimeValue,
-  validateStopStreamValue,
   type ControlError,
   type DeviceRef,
-  type RuntimeControl,
-  RuntimeControlSession,
   type StreamSnapshot,
 } from "../../contracts/src/index.js";
 import { acquireRuntime } from "../../runtime/src/index.js";
@@ -23,6 +15,7 @@ import {
   type LocalStateStatusValue,
   type RuntimeOwnerLocal,
 } from "../../runtime/src/owner.js";
+import { createAgentControl, type AgentControlSession } from "./agent-control.js";
 import { syntaxMode, parseCommand, type CliCommand } from "./parse.js";
 import { OutputWriter, type RecordStream } from "./output.js";
 
@@ -50,12 +43,11 @@ const DEFAULT_RUNTIME: CliRuntimeDependencies = Object.freeze({ acquireRuntime, 
 const freeze = <T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const deepFreeze = <T>(value: T): T => {
   if (typeof value !== "object" || value === null) return value;
-  for (const key of Reflect.ownKeys(value)) { const descriptor = Object.getOwnPropertyDescriptor(value, key); if (descriptor && "value" in descriptor) deepFreeze(descriptor.value); }
+  for (const key of Reflect.ownKeys(value)) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor && "value" in descriptor) deepFreeze(descriptor.value);
+  }
   return Object.isFrozen(value) ? value : Object.freeze(value);
-};
-const exact = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value)) || Reflect.ownKeys(value).length !== keys.length) return false;
-  return keys.every((key) => { const descriptor = Object.getOwnPropertyDescriptor(value, key); return descriptor?.enumerable === true && "value" in descriptor; });
 };
 const sameDevice = (left: DeviceRef, right: DeviceRef): boolean => left.contractVersion === right.contractVersion && left.platform === right.platform && left.namespace === right.namespace && left.opaqueId === right.opaqueId;
 const failure = (code: ControlError["code"]): Readonly<{ ok: false; error: ControlError }> => freeze({ ok: false, error: controlError(code) });
@@ -73,56 +65,7 @@ function checkedControl(value: unknown, validator: (value: unknown) => unknown, 
   else if (Object.hasOwn(result, "snapshot") && !revisionConflict) throw new TypeError("Invalid operation result");
   return deepFreeze(result) as Result;
 }
-function checkedStream(value: unknown, validator: (value: unknown) => unknown, deviceRef: DeviceRef, streamId: string, revisionConflict = false): Result {
-  const result = checkedControl(value, validator, revisionConflict);
-  const snapshot = result.ok ? (result.value as { snapshot: StreamSnapshot }).snapshot : Object.hasOwn(result, "snapshot") ? (result as { snapshot: StreamSnapshot }).snapshot : undefined;
-  const changes = result.ok ? (result.value as { changes?: readonly StreamSnapshot[] }).changes : undefined;
-  if (snapshot && (snapshot.streamId !== streamId || !sameDevice(snapshot.deviceRef, deviceRef)) || changes?.some((change) => change.streamId !== streamId || !sameDevice(change.deviceRef, deviceRef))) throw new TypeError("Invalid stream result identity");
-  return result;
-}
-type RecognizedSession = Readonly<{ session: RuntimeControlSession; close: () => Promise<void> }>;
-function recognizeSession(value: unknown): RecognizedSession | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return;
-  const prototype = Object.getPrototypeOf(value), attachment = Object.getOwnPropertyDescriptor(value, "attachment");
-  if (!attachment?.enumerable || !("value" in attachment)) return;
-  let close: unknown, control: unknown;
-  if (prototype === RuntimeControlSession.prototype) {
-    close = Object.getOwnPropertyDescriptor(RuntimeControlSession.prototype, "close")?.value;
-    try { control = Reflect.get(value, "control", value); } catch { return; }
-  } else if (prototype === Object.prototype || prototype === null) {
-    const closeDescriptor = Object.getOwnPropertyDescriptor(value, "close"), controlDescriptor = Object.getOwnPropertyDescriptor(value, "control");
-    if (!closeDescriptor || !("value" in closeDescriptor) || !controlDescriptor?.enumerable || !("value" in controlDescriptor)) return;
-    close = closeDescriptor.value; control = controlDescriptor.value;
-  } else return;
-  if (typeof close !== "function" || typeof control !== "object" || control === null) return;
-  const session = value as RuntimeControlSession;
-  return freeze({ session, close: async () => { await Reflect.apply(close as () => unknown, session, []); } });
-}
-function rawAcquireSession(value: unknown): RecognizedSession | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return;
-  const ok = Object.getOwnPropertyDescriptor(value, "ok"), session = Object.getOwnPropertyDescriptor(value, "session");
-  return ok?.enumerable && "value" in ok && ok.value === true && session?.enumerable && "value" in session ? recognizeSession(session.value) : undefined;
-}
-function checkedAcquire(value: unknown): Readonly<{ ok: true; session: RuntimeControlSession }> | Readonly<{ ok: false; error: ControlError }> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError("Invalid acquire result");
-  const okDescriptor = Object.getOwnPropertyDescriptor(value, "ok");
-  if (!okDescriptor?.enumerable || !("value" in okDescriptor) || typeof okDescriptor.value !== "boolean") throw new TypeError("Invalid acquire result");
-  const ok = okDescriptor.value, branch = ok ? "session" : "error";
-  if (!exact(value, ["ok", branch])) throw new TypeError("Invalid acquire result");
-  if (!ok) { const error = Object.getOwnPropertyDescriptor(value, "error"); if (!error || !("value" in error)) throw new TypeError("Invalid acquire result"); return freeze({ ok: false, error: deepFreeze(validateControlError(error.value)) }); }
-  const recognized = rawAcquireSession(value), attachment = recognized && Object.getOwnPropertyDescriptor(recognized.session, "attachment");
-  if (!recognized || !attachment || !("value" in attachment)) throw new TypeError("Invalid acquire result");
-  validateRuntimeAttachment(attachment.value);
-  return freeze({ ok: true, session: recognized.session });
-}
-async function withSession(runtime: CliRuntimeDependencies, request: Parameters<typeof acquireRuntime>[0], signal: AbortSignal | undefined, operation: (control: RuntimeControl, session: RuntimeControlSession) => Promise<Result>): Promise<Result> {
-  const acquired = checkedAcquire(await runtime.acquireRuntime(request, signal ? { signal } : undefined));
-  if (!acquired.ok) return acquired;
-  try {
-    if (request.selector.kind === "known" && !sameDevice(acquired.session.attachment.instance.deviceRef, request.selector.deviceRef)) throw new TypeError("Invalid acquired identity");
-    return await operation(acquired.session.control, acquired.session);
-  } finally { await acquired.session.close().catch(() => undefined); }
-}
+
 async function withOwner<T>(runtime: CliRuntimeDependencies, operation: (owner: RuntimeOwnerLocal) => Promise<T>): Promise<T> {
   const owner = runtime.createRuntimeOwnerLocal();
   try { return await operation(owner); }
@@ -138,19 +81,12 @@ async function lookup(owner: RuntimeOwnerLocal, opaqueId: string | undefined, si
 }
 
 async function ensure(command: Extract<CliCommand, { path: "viewer ensure" }>, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
-  if (command.platform) return withSession(runtime, { mode: "start-or-attach", selector: { kind: "auto", platform: "android" } }, signal, (control, session) => ensureSession(control, session, signal));
+  const agent = createAgentControl({ acquireRuntime: runtime.acquireRuntime }), options = signal ? { signal } : undefined;
+  if (command.platform) return agent.ensure({ selector: { kind: "auto", platform: "android" } }, options);
   return withOwner(runtime, async (owner) => {
     const found = await lookup(owner, command.deviceRef, signal);
-    if (!found.ok) return found;
-    return withSession(runtime, { mode: "start-or-attach", selector: { kind: "known", deviceRef: found.value.deviceRef } }, signal, (control, session) => ensureSession(control, session, signal));
+    return found.ok ? agent.ensure({ selector: { kind: "known", deviceRef: found.value.deviceRef } }, options) : found;
   });
-}
-async function ensureSession(control: RuntimeControl, session: RuntimeControlSession, signal?: AbortSignal): Promise<Result> {
-  const ensured = checkedControl(await control.ensureViewer(signal ? { signal } : undefined), validateEnsureViewerValue);
-  if (!ensured.ok) return ensured;
-  const value = ensured.value as ReturnType<typeof validateEnsureViewerValue>;
-  if (!sameDevice(session.attachment.instance.deviceRef, value.deviceRef)) throw new TypeError("Invalid ensure identity");
-  return deepFreeze({ ok: true as const, value: { attachment: session.attachment, deviceRef: value.deviceRef, descriptor: value.descriptor, snapshot: value.snapshot } });
 }
 
 async function storedCommand(command: Exclude<CliCommand, { path: "viewer ensure" | "stream wait" | "stream watch" | "local-state status" | "local-state reset-control" | "local-state rebind-device" }>, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
@@ -159,19 +95,20 @@ async function storedCommand(command: Exclude<CliCommand, { path: "viewer ensure
     const found = await lookup(owner, opaqueId, signal);
     if (!found.ok) return found;
     const deviceRef = found.value.deviceRef, options = signal ? { signal } : undefined;
-    if (command.path === "viewer approve") return checkedStream(await owner.approveViewerPairing({ deviceRef, streamId: command.streamId, pairingCode: command.code }, options), validateApproveViewerValue, deviceRef, command.streamId);
     if (command.path === "runtime shutdown") return checkedControl(await owner.shutdownRuntime({ deviceRef }, options), validateShutdownRuntimeValue);
-    const request = { mode: "attach-only" as const, selector: { kind: "known" as const, deviceRef } };
-    return withSession(runtime, request, signal, async (control) => command.path === "stream inspect"
-      ? checkedStream(await control.inspect({ streamId: command.streamId, ...(command.afterRevision === undefined ? {} : { afterRevision: command.afterRevision }) }, options), validateInspectControlValue, deviceRef, command.streamId)
-      : checkedStream(await control.stopStream({ streamId: command.streamId, ...(command.expectedRevision === undefined ? {} : { expectedRevision: command.expectedRevision }) }, options), validateStopStreamValue, deviceRef, command.streamId, true));
+    const agent = createAgentControl({ acquireRuntime: runtime.acquireRuntime }), active = await agent.openKnown({ deviceRef }, options);
+    try {
+      return command.path === "stream inspect"
+        ? await active.inspect({ streamId: command.streamId, ...(command.afterRevision === undefined ? {} : { afterRevision: command.afterRevision }) }, options)
+        : await active.stop({ streamId: command.streamId, ...(command.expectedRevision === undefined ? {} : { expectedRevision: command.expectedRevision }) }, options);
+    } finally { await active.close(); }
   });
 }
 
 async function observation(command: Extract<CliCommand, { path: "stream wait" | "stream watch" }>, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<number> {
   const controller = new AbortController(), forward = (): void => controller.abort();
   signal?.addEventListener("abort", forward, { once: true }); if (signal?.aborted) forward();
-  const writer = new OutputWriter(io.stdout as unknown as RecordStream, forward); let closeSession: (() => Promise<void>) | undefined;
+  const writer = new OutputWriter(io.stdout as unknown as RecordStream, forward); let active: AgentControlSession | undefined;
   const failureStatus = (): 3 | 5 | undefined => writer.failure?.exitStatus;
   const emit = async (result: Result): Promise<number> => {
     const failed = failureStatus();
@@ -185,24 +122,19 @@ async function observation(command: Extract<CliCommand, { path: "stream wait" | 
     if (failed !== undefined) return failed;
     const found = await withOwner(runtime, (owner) => lookup(owner, undefined, controller.signal));
     if (!found.ok) return await emit(found);
-    const rawAcquire = await runtime.acquireRuntime({ mode: "attach-only", selector: { kind: "known", deviceRef: found.value.deviceRef } }, { signal: controller.signal });
-    closeSession = rawAcquireSession(rawAcquire)?.close;
-    const acquired = checkedAcquire(rawAcquire);
-    if (!acquired.ok) return await emit(acquired);
-    const active = acquired.session;
-    if (!sameDevice(active.attachment.instance.deviceRef, found.value.deviceRef)) throw new TypeError("Invalid acquired identity");
+    const agent = createAgentControl({ acquireRuntime: runtime.acquireRuntime });
+    active = await agent.openKnown({ deviceRef: found.value.deviceRef }, { signal: controller.signal });
     if (command.path === "stream wait") {
-      const result = checkedStream(await active.control.wait({ streamId: command.streamId, afterRevision: command.afterRevision, waitMs: command.waitMs }, { signal: controller.signal }), validateInspectControlValue, found.value.deviceRef, command.streamId);
-      return await emit(result);
+      return await emit(await active.wait({ streamId: command.streamId, afterRevision: command.afterRevision, waitMs: command.waitMs }, { signal: controller.signal }));
     }
     let cursor = command.afterRevision;
     for (;;) {
       const failed = failureStatus();
       if (failed !== undefined) return failed;
       const raw = cursor === undefined
-        ? await active.control.inspect({ streamId: command.streamId }, { signal: controller.signal })
-        : await active.control.wait({ streamId: command.streamId, afterRevision: cursor, waitMs: 30_000 }, { signal: controller.signal });
-      const result = checkedStream(raw, validateInspectControlValue, found.value.deviceRef, command.streamId), status = await emit(result);
+        ? await active.inspect({ streamId: command.streamId }, { signal: controller.signal })
+        : await active.wait({ streamId: command.streamId, afterRevision: cursor, waitMs: 30_000 }, { signal: controller.signal });
+      const result = raw as Result, status = await emit(result);
       if (status !== exitStatus(result)) return status;
       if (!result.ok) return status;
       const snapshot = (result.value as { snapshot: StreamSnapshot }).snapshot;
@@ -213,7 +145,7 @@ async function observation(command: Extract<CliCommand, { path: "stream wait" | 
     return failureStatus() ?? await emit(unexpected());
   } finally {
     signal?.removeEventListener("abort", forward);
-    await closeSession?.().catch(() => undefined);
+    await active?.close();
     writer.dispose();
   }
 }

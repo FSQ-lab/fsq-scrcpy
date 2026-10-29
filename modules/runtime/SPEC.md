@@ -29,14 +29,14 @@ Runtime 可依赖 Capture 和 Contracts，不依赖 Viewer 或 `Appium_connect_a
 - 第一批为本地 macOS 宿主、单设备、单流。
 - 当前 standalone v1 仅使用进程内 module interface；外部 Adapter 拉起/连接由后续跨仓 SPEC delta 定义。
 - 视频操控与视频观看互不构成可用性依赖。
-- Runtime 与 Viewer 仅绑定 loopback；pairing、capability、Host 和 Origin 策略由下方契约固定。
+- Runtime 与 Viewer 仅绑定 loopback；auto-bootstrap、session capability、Host 和 Origin 策略由下方契约固定。
 
 ## Local Runtime Contract v1
 
 ### Current standalone module interface
 
 ```text
-ensureStandaloneViewer(deviceRef, idempotencyKey) -> ViewerAccess + StreamSnapshot
+ensureStandaloneViewer(deviceRef, idempotencyKey) -> ViewerDescriptor + StreamSnapshot
 inspect(streamId, afterRevision?) -> current snapshot or ordered changes
 stop(streamId, expectedRevision?, reason) -> terminal snapshot
 ```
@@ -45,8 +45,8 @@ This is the Runtime module interface used inside the current process, not a seri
 
 ### Loopback security and leases
 
-- Bind loopback only; validate Host and Origin against exact allowlists. The standalone URI is a non-secret pairing page. Pairing codes/grants use at least 128 bits from the OS CSPRNG; Runtime persists only a keyed digest/comparison record and uses constant-time comparison.
-- Browser pairing creates a code and bootstrap grant with a 60-second absolute TTL; local owner approval exchanges it once for an HttpOnly, SameSite=Strict media session cookie with a 60-second reconnect TTL, bound to instance/StreamId/audience and revoked on stop/Runtime exit. Secrets are excluded from query strings, ordinary/model output, errors, persisted history, logs, process arguments and telemetry. Unauthenticated, expired, replayed or wrong-audience requests allocate no Capture or large queue.
+- Bind loopback only; validate Host and Origin against exact allowlists. The standalone URI is a non-secret Viewer page；authorization permit和cookie只由Runtime内部管理。
+- Authenticated ensure建立30000ms permit；eligible browser claim换取HttpOnly session cookie。Secrets不进入query、ordinary/model output、error、history、log、argv或telemetry；unauthenticated/expired/replayed/wrong-audience请求不分配Capture或large queue。
 - Visible authenticated demand renews at least every 2 seconds. Hidden/pagehide/disconnect stops renewal and enters 5-second `grace`. Return within grace keeps the StreamId and enters `syncing`; expiry runs unified stop. Browser close notification is advisory; the server deadline is authoritative.
 - Runtime admits one active Viewer. `viewer-limit-reached` is returned before allocating a second Viewer.
 
@@ -104,29 +104,27 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
 ### In-process API, revision and linearization
 
-- Public types reuse Contracts and expose no `ws`, HTTP or Capture implementation object. Exact results are: `EnsureResult = {ok:true,value:{access:ViewerAccess,snapshot:StreamSnapshot}} | {ok:false,error:StreamError}`; `ApproveResult = {ok:true,value:{snapshot:StreamSnapshot,approvedAt:number}} | {ok:false,error:StreamError}`; `InspectResult = {ok:true,value:{snapshot:StreamSnapshot,changes:readonly StreamSnapshot[],reset:boolean}} | {ok:false,error:StreamError}`; `StopResult = {ok:true,value:{snapshot:StreamSnapshot}} | {ok:false,error:StreamError} | {ok:false,error:StreamError,snapshot:StreamSnapshot}` where only a known-stream expectedRevision mismatch carries snapshot. Signatures are `ensureStandaloneViewer({deviceRef,idempotencyKey}):Promise<EnsureResult>`, `approvePairing({streamId,pairingId,pairingCode,viewerGrant}):Promise<ApproveResult>`, `inspect({streamId,afterRevision?}):InspectResult`, and `stop({streamId,expectedRevision?,reason:"explicit-stop"}):Promise<StopResult>`. Top-level requests/results and ordinary nested records are frozen exact plain/null-prototype data; the nested ViewerAccess intentionally retains its confirmed secret-safe class/factory representation. `approvedAt` is integer Unix epoch milliseconds `0..Number.MAX_SAFE_INTEGER`.
-- Operation errors are fixed: ensure returns only `malformed-control`, `runtime-bind-failed` or `runtime-overload`; it does not start Capture and cannot return Capture/device errors. Approve returns `unauthorized`, `malformed-control` or `viewer-limit-reached`; inspect returns `malformed-control`; stop returns snapshot-bearing `malformed-control` only for a known nonterminal revision mismatch and snapshot-less `malformed-control` for unknown StreamId. Operational terminal failure is represented by successful StopResult containing the frozen final snapshot. HTTP maps malformed JSON/control to 400, unauthorized/expired/replay to 401, unknown stream/route to 404, state conflict/viewer limit to 409, body too large to 413, media type to 415 and rate excess to 429; safe bodies never distinguish unknown versus unauthorized protected resources.
-- `idempotencyKey` is unpadded base64url, 22..128 characters. Canonical input bytes are UTF-8 over fixed field order `contractVersion,platform,namespace,opaqueId` with u16 length prefixes, never generic JSON. Runtime retains at most 64 records and never expires or evicts the record bound to a nonterminal stream. Before a new ensure it purges terminal records only after exactly `max(createdAt+10 minutes, terminalPublishedAt+60 seconds)`; if 64 retained records remain it returns `runtime-overload`. ViewerAccess is returnable only during its 60-second owner-grant lifetime; afterward same key/input returns fixed `unauthorized`, never the expired secret, while different input remains `malformed-control`. A different ensure key is `malformed-control` while the stream is nonterminal; after terminal publication a new key may create a new StreamId.
+- Public types reuse Contracts and expose no `ws`, HTTP or Capture implementation object. Exact results are: `EnsureResult = {ok:true,value:{descriptor:ViewerDescriptor,snapshot:StreamSnapshot}} | {ok:false,error:StreamError}`；`InspectResult`和`StopResult`保持既有exact shape。Signatures为`ensureStandaloneViewer({deviceRef,idempotencyKey})`、`inspect(...)`和`stop(...)`；值均为frozen exact plain/null-prototype data。
+- Operation errors保持fixed：ensure只返回`malformed-control|runtime-bind-failed|runtime-overload`且不启动Capture；inspect/stop规则不变。浏览器authorization失败使用fixed HTTP/StreamError 401，不进入ControlError union。
+- `idempotencyKey` grammar、canonical input、64-record retention与terminal purge规则不变。active stream同key返回current descriptor/snapshot；armed permit到期可由后续authenticated ensure在同StreamId re-arm，different key在nonterminal仍`malformed-control`；terminal后新key可创建新StreamId。
 - Each mutating operation has one mutex-protected linearization point. `revision` starts at `1` for `demand-pending` and increases by one per externally observable snapshot. Inspect without `afterRevision` returns `{snapshot,changes:[],reset:false}`; equal/current revision returns no changes; newer-than-current is `malformed-control`. Runtime retains at most 64 ordered changes/512 KiB; an older evicted revision returns `{snapshot,changes:[],reset:true}`. Ordinary consecutive snapshots may coalesce before observation; terminal/stopping changes never coalesce.
 - Stop on an unknown StreamId is `malformed-control`. A nonterminal `expectedRevision` mismatch returns `malformed-control` plus the unchanged current snapshot. The first valid stop linearizes terminalization; repeated stop after terminal returns the same frozen terminal snapshot regardless of expectedRevision. Concurrent ensure/stop obey mutex order and never create two Capture sessions.
 
-### Standalone pairing, owner approval and session cookie
+### Standalone authorization, session cookie and assets
 
-- The exact surface is HTTP `GET /viewer/<streamId>`, `GET /assets/<lowercase-sha256>/<basename>`, `POST /v1/pairings`, `POST /v1/pairings/<pairingId>/redeem`, `POST /v1/sessions`, `POST /v1/sessions/refresh`, `DELETE /v1/sessions/current`; and WebSocket upgrade `GET /v1/stream` only with `fsq-viewer.v1`. Runtime receives one frozen exact `ViewerAssetManifest { entries }`: entries is an array of 2..16 frozen exact `{role,name,sha256,mime}` records backed by private copied bytes that are never exposed or frozen as TypedArrays. `role` is `entry-module`, `worker-module` or `style`; there is exactly one entry-module, exactly one worker-module and at most 14 styles. Module roles require `text/javascript; charset=utf-8`; style requires `text/css; charset=utf-8`. Name is unique and matches `[a-z0-9][a-z0-9._-]{0,63}` with no slash; SHA-256 is lowercase hex and matches private bytes; each payload is nonempty and at most 1 MiB; total bytes are at most 2 MiB. Raw request-target exactly matches a listed route/path and contains no percent escape/query/fragment. Runtime freezes records/map, accepts no filesystem path and exposes no private bytes. HTML inserts only entry-module as `<script type="module">` and styles as links; worker-module remains a self-hosted URL and is never a document script. Other methods/routes and additional keys are 404/405 without allocation.
-- Node HTTP server uses `maxHeaderSize=8192`, at most 32 headers, `headersTimeout=5000` and request timeout 5000 ms. Every body route requires one canonical `Content-Type: application/json; charset=utf-8`, one decimal Content-Length and no Transfer-Encoding. Content-Length and bytes read are each at most 4096 and must match exactly. Body read has a two-second idle timeout and five-second total timeout from accepted headers; timeout destroys the request and returns no reusable connection. Missing/duplicate/invalid length, chunked input, premature EOF and body on a bodyless route fail before parse/allocation. The same strict duplicate-key/single-object UTF-8 parser as WebSocket control is used.
-- Pairing start atomically reserves the one Viewer slot and returns 201 `{pairingId,pairingCode,expiresAt}`. `pairingId` is a lowercase v4 UUID; `pairingCode` is the confirmed eight-character Crockford human code, allows five failed comparisons, and is not a bearer. Bootstrap grant is an independent 128-bit unpadded base64url bearer. Runtime stores only process-keyed HMAC-SHA-256 digests with instance/stream/browser-session/audience/expiry context. Pairing and bootstrap each expire absolutely after 60 seconds and are single-use.
-- Trusted in-process `approvePairing` verifies the Contracts ViewerGrant via explicit reveal, constant-time context digest, exact pending identity/code/attempt count and expiry, then returns only `{snapshot,approvedAt}` and marks that pending pairing approved. Before approval redeem returns 409; wrong/expired/replayed inputs share one 401 body. Approved redeem atomically consumes the human code and returns 200 `{bootstrapGrant,expiresAt}` with `Cache-Control: no-store`; session creation accepts no cookie, atomically consumes Authorization grant, and returns 204 with only the media cookie.
-- Cookie is `fsq_media_v1=<opaque>` with `HttpOnly; SameSite=Strict; Path=/; Max-Age=60`; `Secure` is omitted because current transport is exact loopback HTTP. Session creation/refresh success is 204 with no body and one Set-Cookie; refresh requires the current exact cookie, exact Origin/fetch headers and `{visible:true}`, rotates the token/digest, invalidates the old token and restarts only the 60-second reconnect TTL. HTTP refresh never renews the five-second visible-demand lease; only authenticated WebSocket `lease-renew visible:true` does. DELETE requires the cookie, returns 204 plus Max-Age=0, revokes slot/session and starts normal demand/grace handling. Stop, Runtime exit, policy violation or TTL expiry revokes all related material and zeroes raw temporary buffers.
+- Exact browser surface为`GET /viewer/<streamId>`、content-addressed assets、`POST /v1/sessions`、refresh、DELETE及WebSocket；pairing/redeem routes不存在。`ViewerAssetManifest`的role/name/hash/MIME/size、private copied bytes、HTML script/style及no-filesystem规则保持既有exact边界。
+- Node HTTP server继续使用8KiB/32 headers/5000ms和4096-byte body caps、canonical Content-Type/Length、无Transfer-Encoding、2秒read-idle/5秒total及strict duplicate-key UTF-8 parser。
+- `fsq_auto_v1` claim与`fsq_media_v1` session cookie遵循下方ViewerAuthorization状态机。media cookie仍为`HttpOnly; SameSite=Strict; Path=/; Max-Age=60`；refresh旋转digest并只续60秒reconnect TTL，visible demand只由authenticated WebSocket renewal驱动。
 ### Loopback authority, browser headers and upgrade
 
 - Runtime binds only `127.0.0.1` on an OS-selected ephemeral port. The sole authority and origin are `127.0.0.1:<selected-port>` and `http://127.0.0.1:<selected-port>`; `localhost`, IPv6, alternate ports and absolute-form proxy targets are rejected. Exactly one canonical Host is required. Duplicate Host/Origin/Cookie/Authorization headers, any `Forwarded`, `Via` or `X-Forwarded-*`, and any proxy-auth header are rejected before body read/allocation.
 - Top-level Viewer GET is the only route permitting missing Origin and then requires `Sec-Fetch-Site: none`, `Sec-Fetch-Mode: navigate`, `Sec-Fetch-Dest: document`. Every browser API request requires exact Origin plus `Sec-Fetch-Site: same-origin`; WebSocket upgrade requires exact Host/Origin, valid cookie and exactly one subprotocol token `fsq-viewer.v1`. OPTIONS is 405; no CORS allow header is emitted.
-- Viewer responses include `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: camera=(), microphone=(), geolocation=()` and the confirmed CSP/frame-ancestors policy. Error bodies are fixed safe JSON and contain no authority input, bearer, pairing code or internal path.
+- Viewer responses include existing no-store/nosniff/referrer/permissions/CSP headers。Error bodies固定secret-safe，不含authority input、cookie、permit或internal path。
 - Asset responses require exact same authority, no Origin or exact same Origin, and return the manifest MIME, immutable ETag equal to SHA-256, `Cache-Control: public,max-age=31536000,immutable`, nosniff and the exact bytes. Viewer HTML remains no-store and references no inline script/style. A missing/mismatched manifest entry is 404 without reading arbitrary disk.
 
 ### Single-Viewer state machine
 
-- Viewer slot states are `free → pairing-pending → approved → session-issued → connected → grace → free/revoked`. Pairing start owns the slot; a second start/session identity returns `viewer-limit-reached` before new secret/queue allocation. Pending/approved/bootstrap expiry releases the slot if no session exists.
+- Viewer slot状态由下方`ViewerAuthorization`唯一状态机拥有。One session cookie identifies the slot, not a tab；second WebSocket拒绝；grace内同session可reconnect，其他session不能take over。
 - One session cookie identifies the slot, not a tab. A second WebSocket while the first is active is rejected. During grace, the same unexpired rotated session may reconnect: Runtime fences/closes the old socket, releases its unsent/decode-credit ownership through the current discard watermark, creates fresh per-connection sequence/credit state, and enters `syncing`. Different session/cookie cannot take over. Malformed/slow socket loss enters grace; explicit DELETE, TTL/policy revocation or grace expiry frees the slot and stops demand.
 
 ### Strict WebSocket control
@@ -151,7 +149,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
 ### Unified terminalization
 
-- Stop request, grace/lease expiry, proven disconnect, Capture failure, Runtime overload and transport failure compete for one atomic first-cause winner; after the winner no later cleanup error changes public cause. The winner revokes pairing/grants/cookie/lease, publishes `stopping`, fences Capture and send producers, and prevents every later media enqueue.
+- Stop request、grace/lease expiry、proven disconnect、Capture failure、Runtime overload和transport failure竞争一个first-cause winner；winner撤销permit/claim/session/lease，发布`stopping`并fence所有producer。
 - Runtime calls idempotent Capture stop when applicable, awaits its cached `closed()` result, records but does not replace the winner on mismatch/cleanup error, releases queued-unsent application media and logical ownership, and retains every accepted pending-send byte until callback or forced close. It then enqueues at most one END if an authenticated socket exists; END bypasses Frame credit, consumes control/total capacity from the 64-KiB reserve and remains pending-owned until callback/close.
 - END send has a one-second callback deadline. Success closes 1000; timeout/send error destroys/closes 1011. No media/control envelope follows END. Runtime then closes HTTP/WS resources, continues all cleanup, and publishes exactly one frozen terminal snapshot as the final revision; inspect cannot observe terminal before producer fencing and Capture reconciliation complete.
 
@@ -168,11 +166,11 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - 首次有效 authenticated hello 后 `lease-renew visible:true` 线性化时启动五秒 first-paint deadline。仅当前 epoch painted ACK 成功；deadline 到达以 start-timeout 赢得统一终止，fence Capture、END failed、最终 snapshot；晚 ACK 不复活。
 - MJPEG streaming 只在有效当前 epoch painted ACK 后发布。最近 paint 后恰好 2 秒同步退出 streaming，发布 interrupted/stream-interrupted；12 秒前新 paint 经 syncing 回 streaming；12 秒到达 terminal failed/stream-interrupted，关闭 FSQ source，重试必须新 StreamId。source HTTP idle 也是 12 秒，不得更早。
 - grace 暂停 freshness timer，页面已非 Live；五秒 grace 内返回进入 syncing 并重启 12 秒 fresh-paint deadline；首次启动仍受五秒约束。epoch change 同步退出 Live，旧 epoch ACK 不恢复。
-- EOF/reset 不证明设备拔除；stream-interrupted→failed。first-cause、producer fencing、一次 END/final snapshot、callback/ACK 释放、grants/leases 清理继续适用，不停止外部自动化。
+- EOF/reset不证明设备拔除；stream-interrupted→failed。first-cause、producer fencing、一次END/final snapshot、callback/ACK释放、authorization/session清理继续适用，不停止外部自动化。
 
 ## ACK/profile Contract
 
-本节覆盖上文相应 ACK 限额/校验、Runtime 构造及 Viewer bootstrap 条款，既有安全/租约和5s/2s/12s目标不变。
+本节覆盖ACK限额/校验、Runtime构造及Viewer bootstrap；既有安全/session lease和5s/2s/12s目标不变。
 
 - 连接在接受 MJPEG minor1 Session 后允许1024 ACK/rolling10s；minor0及尚未绑定模式的冷启动保持128，non-ACK保持32、文本保持4096字节。窗口为 `(now-10000,now]`；所有重复/零值/release-only/旧 epoch ACK均计数，超额1008；额度改变不清空既有窗口，客户端不能通过添加paint字段选额。冷启动不开放minor1四字段 ACK。1024为控制面滥用上限，不是FPS承诺或合法突发永不被关的保证。
 - 完整双水位作无副作用校验后，才能原子提交 ACK/paint、释放credit/bytes及允许下次发送；非法paint不得先调用会释放/flush的旧ack路径。只有当前epoch且当前可见周期合格的新paint advancement更新freshness；ACK本身不续租。新可见周期丢弃旧staging并记录既有assigned序列界线，界线内旧ACK只清理、不恢复Live，返回后需新鲜Frame paint。
@@ -180,7 +178,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - 下一张MJPEG的assignment必须同时等待前一张callback与ACK/GAP/terminal所有权释放；至多一staging、一assigned、连续envelope序列、8MiB去重总所有权和64KiB control reserve不变。schema/order/rate/未知paint关闭Viewer1008，oversize1009，内部transport1011；既有grace/first-cause路径不变，不伪装成source断线或设备拔除。
 - 在ACK线性化处重新检查单调deadline；达到5秒启动或12秒freshness终止界线后，晚ACK不能因timer callback延迟而复活流。grace内不刷新可见freshness；epoch/可见周期变化清除Live资格。END/final snapshot仍恰好一次，之后不再admit媒体。
 - `RuntimeServiceOptions.mediaProfile`必填且仅为`"h264-annexb"|"mjpeg"`，在构造时私有复制为不可变配置；缺失/非法值在bind或Capture分配前抛出固定本地`TypeError("Invalid media profile")`。不新增序列化错误、兼容默认值、platform推断、source registry或fallback；所有当前构造调用方同步迁移。composition root负责选取匹配的固定CaptureSource，Runtime对不匹配的首个或后续Session codec以malformed-media终止。
-- 既有no-store Viewer HTML根元素恰好提供一个经枚举验证的`data-media-profile="h264-annexb"`或`data-media-profile="mjpeg"`属性，供Main在demand前读取。不进入DeviceRef、ViewerDescriptor、URL、bearer或provider locator；既有route/manifest/CSP/Host/Origin/pairing边界不变。精确Main/Worker preflight协议由Viewer同名delta拥有。
+- no-store Viewer HTML根元素继续提供exact mediaProfile属性；不进入DeviceRef、ViewerDescriptor、URL、credential或provider locator。route/manifest/CSP/Host/Origin/auto-bootstrap边界不变。
 
 
 ## macOS Android RuntimeControl v1
@@ -201,19 +199,17 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
   ```
 
   `RuntimeControlSession`是client-local object，含serialized-safe `attachment`和普通`control`；`toValue()`只返回`{attachment}`。`close()`/async dispose只关闭该client的keep-alive control sockets与pending local waits，不stop stream或Runtime。Contracts规定的local/serialized enumeration、JSON与inspect边界必须保持。
-- ordinary `control`恰好提供`ensureViewer({signal?})`、`inspect({streamId,afterRevision?},{signal?})`、`wait({streamId,afterRevision,waitMs},{signal?})`和`stopStream({streamId,expectedRevision?},{signal?})`。composition-root private `RuntimeOwnerControl`另提供`approveViewerPairing({streamId,pairingCode},{signal?})`和`shutdownRuntime({instanceId,generation},{signal?})`；owner methods不挂到ordinary session，不属于serialized值。
+- ordinary `control`提供ensure/inspect/wait/stop。composition-root private `RuntimeOwnerControl`只提供`shutdownRuntime`；owner methods不挂到ordinary session，不属于serialized值。
 - acquire是唯一auto-binding入口。auto调用已验收Capture resolver；Runtime provider是唯一可调用`revealAndroidBinding`的consumer，并把private binding复制进persistent candidate。known只查已有safe DeviceRef，绝不调用resolver或生成/remap identity。Capture不依赖Runtime，private access不跨provider/client seam。
 - 一个valid persistent slot保存一份32-byte CSPRNG root credential。Runtime按下文HMAC context派生不可互换的client/owner bearer；ordinary session只持有client bearer，owner provider单独持有owner bearer。same-uid malicious process仍是既有out-of-scope；该分权是server-enforced interface authority，不宣称同账号进程隔离。
 
-### Ensure semantic key, ViewerGrant and pairing lifecycle
+### Ensure semantic key and authorization lifecycle
 
-- 每个Runtime generation由`RuntimeService`持有一个不持久化`EnsureCoordinator`：`empty | active{semanticKey,streamId,descriptor,viewerGrant,grantDeadline}`。`semanticKey`是32-byte CSPRNG的canonical unpadded base64url，只用于既有StateStore idempotency语义，不进入wire/state/log/ordinary inspect。
-- control ensure、stop和terminal observation复用`StateStore.mutex`，不增加第二把产品锁。control ensure必须恰好执行一次`state.mutex.run`；其callback内可生成semantic key，调用不会再次取锁的现有`StateStore.ensureLocked`，并在返回前同步完成`RuntimeService.#newStream`资源初始化和Coordinator publication。禁止持有该mutex时调用会自行`mutex.run`的`RuntimeLifecycle.ensureStandaloneViewer`或`StateStore.ensureStandaloneViewer`；既有in-process public ensure路径保持不变。
-- `active`且stream非terminal时，所有重复、并发或前次response-loss后的ensure都在同一mutex内重用同一semantic key并返回同一StreamId及当前snapshot，不能返回既有idempotency record的initial snapshot。该单次临界区是key创建、StreamId、stream资源与grant owner的唯一线性化点；任何观察者不能看见缺少stream资源或Coordinator的已发布stream。
-- ViewerAccess只在现有60秒owner-grant lifetime内可由相同key重取。monotonic `grantDeadline`到达或in-process ensure返回`unauthorized`时，Coordinator立即丢弃ViewerGrant/access引用；同一active stream的后续ensure固定返回`unauthorized`，不生成新key、不重放或替换secret。
-- terminal snapshot发布时撤销/丢弃grant并标记旧record terminal。下一次ensure在mutex内生成新semantic key，按现有Runtime规则创建新StreamId；若ensure先于并发stop线性化可返回旧active stream，stop先线性化则下一ensure创建新stream。stop重复仍返回同一terminal snapshot。
-- owner approve wire只提交streamId和八字符pairingCode。provider以Coordinator私有ViewerGrant和`RuntimeLifecycle`当前唯一pending pairing identity调用既有`approvePairing`；pairingId/ViewerGrant不跨control seam。pending不存在、stream不匹配、expired/replayed/wrong code统一`unauthorized`；wrong code继续计入既有五次限制，60秒pairing/bootstrap/session规则不变。
-- CSPRNG raw key/grant bytes在base64url编码后`fill(0)`；ECMAScript string、V8 copy、OS cache和storage block不作不可实现的zeroization承诺。到期/terminal/close必须丢引用，并禁止普通序列化、inspect、日志和异常输出。
+- 每个generation持有不持久化`EnsureCoordinator: empty|active{semanticKey,streamId,descriptor}`；authorization状态只在下方`ViewerAuthorization`中。semanticKey不进入wire/state/log/inspect。
+- control ensure、stop、terminal observation和ViewerAuthorization复用唯一StateStore mutex。ensure恰执行一次mutex临界区，完成semantic key、stream resources、permit与Coordinator publication；禁止锁内重入public ensure。
+- active nonterminal repeat/concurrent/response-loss ensure复用semantic key、StreamId和current snapshot。该临界区是资源与permit的唯一publication；不得看见缺少stream/authorization资源的published stream。
+- armed permit到期可由fresh authenticated ensure re-arm；claimed/delivering/session-issued/connected/grace ensure只返回current descriptor，不授权takeover。terminal撤销authorization并允许下一ensure生成新semantic key/StreamId。
+- CSPRNG临时bytes编码后fill；ECMAScript string、V8 copy、OS cache和storage block不作不可实现的zeroization承诺。到期/terminal/close丢引用且不普通序列化。
 
 ### Fixed root and persistent slot
 
@@ -255,7 +251,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
   ```
 
   两个context和参数顺序固定，不加NUL、JSON或platform字段；derived raw Buffer在listener/session释放后fill。root/client/owner bearer都不进入argv、env、stdout/stderr、ordinary result或日志。
-- hello、ensure、inspect、stop只接受exact `Authorization: FSQ-Control <clientBearer>`；approve、shutdown只接受exact `Authorization: FSQ-Owner <ownerBearer>`。任一bearer用于另一authority route都固定401。ordinary session只持有clientBearer；owner provider不把ownerBearer交给session。
+- hello、ensure、inspect、stop只接受exact client bearer；shutdown只接受exact owner bearer。任一bearer用于另一authority route固定401；ordinary session不持有owner bearer。
 
 ### Runtime generation filesystem state
 
@@ -295,7 +291,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 - owner shutdown request必须target匹配且以owner authority认证。它先线性化`shutting-down`并拒绝新ordinary mutation，走现有stream unified first-cause terminalization，关闭Viewer transport，compare-delete matching generation并directory sync，关闭其他control sockets；向发起者flush 200 shutdown result后关闭最后control socket/listener并exit。
 - shutdown删除generation时old listener仍占port；new starter只有在old listener关闭后才可能bind。old crash留下的stale generation由下一caller在确证port free后删除；old cleanup用compare-delete，不能发生new-generation ABA。
 
-### Seven-route exact HTTP/1.1 wire contract
+### Six-route exact HTTP/1.1 wire contract
 
 - listener只绑定exact `127.0.0.1:<stored-port>`，独立于Viewer origin。request-target必须origin-form且无query/fragment/percent escape。routes恰好如下；所有request object字段都必须按列出顺序出现，nullable字段不得省略：
 
@@ -306,11 +302,10 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 | `POST /v1/stream/inspect` | client | `{controlVersion,target,streamId,afterRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<InspectControlValue>` |
 | `POST /v1/stream/wait` | client | `{controlVersion,target,streamId,afterRevision:positiveSafeInteger,waitMs:0..30000}` | HTTP 200 `ControlResult<InspectControlValue>` |
 | `POST /v1/stream/stop` | client | `{controlVersion,target,streamId,expectedRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<StopStreamValue>`；revision mismatch HTTP 409 exact snapshot-bearing branch |
-| `POST /v1/viewer/approve` | owner | `{controlVersion,target,streamId,pairingCode}` | HTTP 200 `ControlResult<ApproveViewerValue>` |
 | `POST /v1/runtime/shutdown` | owner | `{controlVersion,target}` | HTTP 200 `ControlResult<ShutdownRuntimeValue>`后按shutdown顺序exit |
 
-- hello的`expectedInstance:null`只用于generation final missing/partial；server仍核对controlVersion、contractVersion和exact DeviceRef，并只在auth与Runtime ready后返回authoritative RuntimeInstance。full final必须发送pair并同时匹配instanceId/generation；任何单字段或pair mismatch fail closed。features恰好`["wait-v1"]`；authenticated旧`features:[]`为control-version-mismatch且无fallback。
-- every non-hello request携带RuntimeTarget；server在operation dispatch前重新核对。旧generation bearer即使root相同也不能让旧request作用于新Runtime。route允许的operation error集合为：hello `control-version-mismatch|instance-conflict|malformed-control|runtime-exited|runtime-overload`；ensure另含`unauthorized`；inspect/wait无unauthorized；stop另含`revision-conflict`；approve另含`unauthorized`；shutdown无unauthorized application branch。所有route均可在transport/lifecycle层产生deadline-exceeded或runtime-exited；wait local cancellation为request-cancelled。
+- hello严格核对identity/version；features恰好`["wait-v1","auto-bootstrap-v1"]`，旧/缺失tuple为control-version-mismatch且无fallback。
+- every non-hello request携带RuntimeTarget并在dispatch前重核。route operation errors：hello既有集合；ensure无application unauthorized；inspect/wait不含unauthorized；stop另含revision-conflict；shutdown无unauthorized application branch。transport/lifecycle仍可deadline-exceeded或runtime-exited。
 - authenticated application failure使用Contracts表HTTP status与canonical `ControlResult`；revision-conflict使用其唯一branch。unknown authenticated route为404 `{"error":"not-found"}`；wrong method或OPTIONS为405 `{"error":"method-not-allowed"}`。所有body response固定`Content-Type: application/json; charset=utf-8`、exact decimal Content-Length、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`；不发送CORS、redirect或authority echo。
 - `Content-Type`必须exact `application/json; charset=utf-8`；恰好一个canonical decimal Content-Length，值与bytes相同且0..16384；拒绝Transfer-Encoding。wrong content type为415 `{"error":"unsupported-media-type"}`；missing/duplicate/invalid length、premature EOF、noncanonical body为400，oversize为413。header/body deadline在仍可写时为408 `{"error":"request-timeout"}`，否则destroy。transport error JSON同样canonical和fixed safe，不含ControlError identity evidence。
 
@@ -342,19 +337,19 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
 - exact request shape/canonical bytes在业务I/O前验证；auth framing例外只执行上述fixed bounded work。pre-aborted合法local options在persistent mutation/spawn前返回request-cancelled/not-applied。
 - slot publish前cancel清理own candidate temp。slot已经durable publish不是要回滚的operation side effect，可保留winner；若尚未spawn仍返回request-cancelled。spawn后ready前cancel通过bootstrap IPC：cancel先于ready且child确认则关闭listener、TERM→2s→KILL如需并reap；ready先线性化则Runtime保持persistent，parent完成hello并返回success，不能杀ready child。
-- read-only request dispatch后cancel可关闭本地socket；未取得权威response时返回deadline-exceeded/unknown，不声称not-applied。ensure/approve/stop/shutdown在各自mutex/状态转换前观察cancel为request-cancelled；线性化后operation继续，若response丢失/超时则client返回deadline-exceeded/unknown。
-- stop线性化后不能由cancel撤销。lost ensure以同selector重新acquire并重放generation semantic key；stop以inspect协调；startup/shutdown以authenticated hello/attach协调。approve线性化后若响应丢失，结果保持`deadline-exceeded/state-unknown`：ordinary inspect不得推断approval结果，client不得自动重放pairing code；只能由当前浏览器配对流程后续成功/失效或新的owner pairing attempt观察。不得因client取消/退出而stop stream或ready Runtime。
+- read-only dispatch后cancel可关闭本地socket；未取得权威response返回deadline-exceeded/unknown。ensure/stop/shutdown在线性化前观察cancel为request-cancelled，线性化后operation继续且response loss为state-unknown。
+- stop不能由cancel撤销。lost ensure以同selector重试并取得同StreamId/authorization state；lost stop用inspect协调；startup/shutdown用hello/attach协调。client取消/退出不stop stream或ready Runtime。
 - child exit、EPIPE、ECONNRESET、filesystem和Capture raw error不进入safe result；按Contracts fixed mapping。所有pending HTTP/child/file/timer在return前settle、清理或明确转移给ready Runtime。
 
 ### Cleanup, privacy and verification
 
-- first-cause stream terminalization、Capture cleanup、Viewer grant/session revoke和END行为沿用现有Runtime contract。`stopStream`只停流，Runtime/control listener保持；shutdown才停进程。FSQ从不停止用户global ADB server、Appium Session或外部非owned process。
-- ordinary JSON/string/inspect/log/error及未来Adapter输出不得含binding、serial/path、root/client/owner credential、semantic key、ViewerGrant、pairingId、cookie、PID、raw exception或media。diagnostics只允许bounded safe operation/outcome/phase，不记录request headers/body或private state。
-- contract suite必须覆盖：local/serialized session枚举；六route canonical bytes与status；client/owner bearer不可互换；ensure concurrent/retry/response-loss/grant expiry/terminal key rotation；control ensure只取得一次mutex、不会重入死锁且成功返回前已有完整stream resources与Coordinator；approve响应丢失固定state-unknown、ordinary inspect不推断且client不重放code；每个ControlError唯一tuple；pre/post-linearization cancel；16/17 changes、12288和16384 byte边界。
+- first-cause terminalization、Capture cleanup、authorization/session revoke和END行为沿用现有Runtime contract；stopStream只停流，shutdown才停进程，FSQ不停止global ADB/Appium/WDA/forward。
+- ordinary JSON/string/inspect/log/error不得含binding、serial/path、root/client/owner credential、semantic key、permit、claim/media cookie、PID、raw exception或media。
+- contract suite覆盖local/serialized session、六route、bearer隔离、ensure并发/retry/response-loss/permit expiry/re-arm/terminal rotation、唯一mutex和完整resource publication、每个ControlError tuple、cancel及response caps。
 - filesystem fault tests在每个write/file-sync/close/link/directory-sync/unlink/rename后模拟crash，覆盖EEXIST/ENOENT/EXDEV/EPERM、多stale secret temp、generation missing/partial/full与free/matching/wrong-auth port；恢复后最多一个canonical slot，named secret temp删除，old generation不能删除new generation。
 - process tests用deterministic clock覆盖winner bind-before-ready、loser EADDRINUSE、parent death与cancel在READY_PUBLISHED两侧、TERM/KILL/reap、response loss、shutdown/new starter race；任何路径最多一个authenticated Runtime，所有non-winner child reaped，ready/ensure在visible demand前Capture.open计数为0。
 - HTTP tests覆盖8/9 slow pre-auth raw sockets、8/9 authenticated keep-alive sockets、8/9 in-flight、pipeline、5秒header/body/idle、64/65 requests/socket、duplicate Host/Auth、invalid token、wrong authority与计数异常close归零；auth失败不得触发route/body/identity parser。
-- 真实macOS arm64/USB Android入口使用temporary RuntimeControl client：并发fresh start/attach只一个ready pair和Runtime；ordinary bearer实测owner route 401；真实Viewer Live；client退出后attach得到同一StreamId；stop只停流；ensure/stop response-loss后可按各自契约协调而approve response-loss保持state-unknown且不重放；owner shutdown清理matching generation；shutdown并发starter不能遭old cleanup ABA；输出/state scan无serial/path/credential/grant/frame。该feature通过不代表CLI/MCP/Windows/iOS或support matrix。
+- 真实macOS Android入口证明并发fresh start/attach单一authority、ordinary bearer访问owner route 401、zero-code真实Viewer Live、same StreamId attach、stop/new StreamId、ensure/stop response-loss协调、owner shutdown、ABA、privacy及外部资源存活；不自动生成支持声明。
 
 ## macOS Android CLI Owner-Local Delta
 
@@ -367,7 +362,6 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
   ```text
   RuntimeOwnerLocal:
     inspectLocalState({platform:"android"},{signal?}) -> OwnerLocalResult<LocalStateStatusValue>
-    approveViewerPairing({deviceRef,streamId,pairingCode},{signal?}) -> ControlResult<ApproveViewerValue>
     shutdownRuntime({deviceRef},{signal?}) -> ControlResult<ShutdownRuntimeValue>
     resetControlState({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<ResetControlStateValue>
     rebindDevice({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<RebindDeviceValue>
@@ -392,7 +386,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
   owner-local validator拥有并严格验证`RuntimeLiveError`和所有local success exact shape；ControlError分支继续调用Contracts validator。它们都不是`ControlWireValue`，不扩展wire error集合；session/object的enumeration、JSON与inspect不得显示内部字段，close只释放本地socket/handle，不stop stream/Runtime。
 - `inspectLocalState`只读返回`uninitialized`，或`ready{deviceRef,stateRevision,runtime:not-running|live{target}}`。不存在时不mkdir；valid slot加authenticated exact hello才是live；明确ECONNREFUSED才是point-in-time not-running。wrong auth/identity/version、timeout、partial/corrupt/ambiguous state均返回`local-state-recovery-required`。
-- approve/shutdown内部由strict-valid slot/generation取得owner authority，以输入完整DeviceRef重新校验并绑定authenticated current target后调用既有owner route；TOCTOU产生既有safe conflict/unknown结果。任何port、credential、target locator或state path均不返回Integrations。approve输入另含streamId/code；shutdown target不由CLI提供。
+- shutdown内部由strict-valid slot/generation取得owner authority并绑定current target；TOCTOU产生既有safe conflict/unknown结果。任何port、credential、locator或state path不返回Integrations。
 - `resetControlState`保留DeviceRef/binding，生成fresh credential/port；`rebindDevice`先经既有private resolver证明恰好一台已授权设备，再生成fresh DeviceRef/binding/credential/port。成功均使revision恰加一；无slot为instance-not-found，stale identity/revision为instance-conflict，matching live为上述RuntimeLiveError。
 
 ### State replacement and linearization
@@ -421,7 +415,7 @@ Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout�
 
 ### Provider, Host and client bounds
 
-- `RuntimeControlProvider`将features固定为`["wait-v1"]`，inspect/wait复用同一response normalizer。`StateStore.wait`是4-wait最终backstop；第5个在创建listener/timer前runtime-overload。Provider不建第二套history/queue。
+- `RuntimeControlProvider`将features固定为`["wait-v1","auto-bootstrap-v1"]`，inspect/wait复用同一response normalizer。StateStore wait bounds不变。
 - Host新增`/v1/stream/wait`与wait admission ledger。现有上限保持：8 pre-auth、8 authenticated connections、8 total in-flight、每socket一个in-flight、每socket64 requests；wait同时占authenticated/in-flight且全局最多4。第5个wait返回HTTP429 canonical runtime-overload且零wait allocation；`ControlAdmissionSnapshot` exact增加`waits`用于cleanup验证。
 - 每个local `HttpRuntimeControl`最多一个active wait；同client第二个在开socket前local runtime-overload。session `close()/asyncDispose`标记closed、取消并等待pending wait、destroy自己的keep-alive sockets；pending wait返回local request-cancelled，stream/Runtime及其他session不受影响；close后调用仍runtime-exited。
 - Client/server不把wait加入mutating集合。Caller AbortSignal即使request已发送仍为request-cancelled，因为wait只读且registration已清理；真正transport hard deadline/response loss才是deadline-exceeded。peer/socket close只取消对应wait。
@@ -431,3 +425,49 @@ Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout�
 - Provider waitMs为0..30000。既有header/keep-alive 5000ms、body read-idle 2000ms、headers-complete body total 5000ms、connect attempt 1000ms保持；ordinary post-connect total仍5000ms。wait post-connect total恰为`waitMs+5000ms`，response read-idle仍2000ms且受total约束；最大35000ms post-connect/36000ms含connect。Host validated-body后同样以waitMs+5000ms为hard ceiling，超出deadline-exceeded并清waiter。
 - Provider normalizer执行Contracts的16 changes/12288 changes bytes/16384 full response规则；timeout、reset、terminal、change都走同一实现。所有private/provider/media/authority privacy约束保持。
 - Deterministic tests必须覆盖：atomic missed-wake；retained/reset/future；0/30000与deadline-1/exact/early timer/wall jump；首个publication冻结及terminal两步；16/17、12288/16384±1；4/5 waits、8/9 connection/in-flight、same-client第二wait；pre/post-register cancel与publish/deadline race；session/socket/Host close cleanup；reconnect cursor；connect/total/read-idle exact边界。temporary control client真实入口证明timeout、change、terminal、cancel/close、reconnect/reset且无stream side effect；现有CLI viewer ensure/stream inspect scoped tests证明feature tuple及`timedOut:false`透传而命令面无wait/watch；真实设备不可用时单列缺口，不得以fixture冒充。
+
+## Authenticated Ensure Auto-Bootstrap
+
+本节定义 `AGENT-AUTO-VIEWER-BOOTSTRAP-MACOS-ANDROID-11B` 的 Runtime clean cut。媒体、freshness、single-Viewer、loopback、Host/Origin/CSP、grace和统一终止未列部分保持。
+
+### Deep `ViewerAuthorization` seam
+
+- Runtime内部唯一 `ViewerAuthorization` 模块拥有 permit、claim cookie、HTML/session response delivery rollback、media session、refresh/grace和terminal revoke。其窄接口为 `armEnsuredStreamLocked(streamId)`、`navigate(verifiedTopLevelRequest)`、`createSession(verifiedSameOriginRequest)`、`refresh/deleteSession`、`validateUpgrade/connect/resumeVisible/disconnect`。
+- 只有 `RuntimeService.ensureControlViewer` 和trusted in-process `ensureStandaloneViewer` 可在现有 StateStore mutex 内arm；HTTP层只在完成exact Host/Origin/Fetch Metadata/framing/cookie校验后构造verified request。没有第二把产品锁，RuntimeControl/AgentControl/MCP/CLI不增加token、mode、flag或result字段。
+- 同一 generation/active Stream至多一个authorization state：`vacant→armed→claim-delivering→claimed→session-delivering→session-issued→connected↔grace`；任何nonterminal可因stop/failure/shutdown/generation change进入`revoked`。每个delivering状态均以response `finish` commit，以`close|error` rollback；late callback按identity/state fence为no-op。
+- 权威expiry transition恰为：`armed`或`claim-delivering`到permit deadline进入`vacant`；`claimed`或`session-delivering`到同一permit deadline进入`vacant`；`session-issued`到既有60秒media-session deadline且尚未成功WebSocket时进入`vacant`；`connected|grace`继续由media-session TTL、visible lease和5秒grace契约驱动。每次expiry同步撤销对应digest、provisional/committed cookie authority和delivery identity，不自动re-arm。
+- terminal、expiry、response finish/close/error和DELETE在同一mutex线性化：terminal fencing总胜；否则处理事件时`now>=`对应absolute deadline先执行expiry，deadline-1的finish/commit胜。late callback必须看到state/identity不匹配并no-op，不得生成替代permit、claim、cookie、session或Viewer。
+
+### Permit, claim and race semantics
+
+- permit TTL恰为30000 monotonic ms；binding含fixed audience、instanceId/generation、StreamId和absolute deadline，不持久化、不跨generation。`ViewerDescriptor.expiresAt`只是wall描述。
+- repeated/concurrent ensure在armed复用同permit/deadline，不滑动；claimed、delivering、session-issued、connected、grace只返回current descriptor/snapshot且不授权takeover。armed到期且stream仍active、无session时回vacant；后续新authenticated ensure可在同StreamId arm一个fresh permit。terminal后的ensure按既有规则生成新StreamId。
+- ensure pre-linearization cancel为request-cancelled/not-applied且不arm。stream resources、permit和coordinator在同mutex临界区线性化；post-linearization cancel/timeout/response loss沿用state-unknown，permit保留，同selector retry返回同StreamId和authorization state。
+- eligible `GET /viewer/<StreamId>`在armed状态原子reserve first claimant。native direct要求无Origin且`Sec-Fetch-Site:none, Mode:navigate, Dest:document`；显式用户激活link要求`Sec-Fetch-User:?1`且Site为`same-origin|same-site|cross-site`。所有导航拒绝iframe/nested destination、`Purpose`/`Sec-Purpose` prefetch/prerender和非native无activation。
+- HTML response headers在finish前provisional set `fsq_auto_v1`，但只有deadline前`finish`才commit claimed和server-side digest authority；close/error rollback至armed（TTL尚存）否则vacant。浏览器可能已安装的未commit值永远无authority。下一次同generation/Stream且仍armed的eligible GET若携带该known provisional stale值，必须在state allocation前以`Max-Age=0`清除，并在同一请求把它视为credentialless first-claim contender；不得视为same claimant、延长deadline或evict另一claim。第二实际claimant固定409。
+- claim cookie为32 CSPRNG bytes canonical base64url，`HttpOnly; SameSite=Strict; Path=/; Max-Age=30`；Runtime只存context-bound HMAC digest。cookie-less browser从不视为同claimant。已commit claimant可用claim cookie幂等reload。HTML terminal/expiry/finish竞态遵循上列同mutex优先级。
+
+### Session, cookies and browser routes
+
+- Viewer JavaScript只可向exact Host和same Origin发送 `POST /v1/sessions`，且必须为`Sec-Fetch-Site:same-origin`、`Sec-Fetch-Mode:cors`、`Sec-Fetch-Dest:empty`、canonical body `{streamId}`、exactly one current claim cookie、无Authorization。缺失/重复/错误值按既有fixed framing/auth错误拒绝；OPTIONS为405且不发CORS allow header。pairing code、pairingId和bootstrap grant不存在。
+- valid POST原子reserve `session-delivering`；204 provisional set `fsq_media_v1`且在首个WebSocket前保留`fsq_auto_v1`。deadline前response `finish` commit session-issued；close/error令任何provisional media cookie server-invalid并rollback到claimed（permit TTL尚存）否则vacant。session finish同样在mutex重查permit absolute deadline：`now>=deadline`先expire且不commit，deadline-1 finish胜；late callback no-op。
+- committed 204 response loss允许same claimant重试：valid existing media cookie为idempotent 204；absent/invalid provisional media cookie旋转/重发同session identity，不创建第二Viewer。并发POST仅一条delivery flight，其余deterministic retry/conflict。
+- 首次成功authenticated WebSocket消费server-side claim digest；浏览器claim cookie可留到Max-Age或后续media-authenticated HTTP清除，但digest移除后无authority。media cookie继续60秒reconnect TTL、30秒HTTP refresh、visible renewal和5秒grace；refresh不re-arm permit且不续visible demand。
+- valid same-Stream media cookie在session-issued/connected/grace可reload HTML。第二WebSocket/Viewer fail closed；只有fresh painted output进入Live，所有non-Live状态覆盖cached frame。
+- Cookie names恰为`fsq_auto_v1`和`fsq_media_v1`；每名至多一个。duplicate、unknown或malformed在state allocation前失败。pre-connect current claim加absent/valid/server-invalid provisional media仍是同claimant；invalid media被覆盖。post-connect valid current media加stale claim允许reload并清claim。
+- newly armed Stream打开时先清stale revoked/other-Stream/old-generation known cookies再commit新claim。unknown/inactive route 404；missing/expired/wrong credential 401；no permit、other claimant、delivery或Viewer conflict 409；既有size/media/admission错误不变且secret-free。
+- `DELETE /v1/sessions/current`在claim未消费前接受current claim加optional media，204清两cookie并将claimed/session-delivering/session-issued转vacant，不进grace/terminal；claim消费后接受current media加optional stale claim，保持既有revoke→grace并清两cookie。missing/duplicate/unknown/stale-only/other-Stream/old-generation固定401，清presented known names且零state mutation。
+- 保留Viewer/assets、POST sessions、refresh、DELETE和WebSocket route；clean-cut删除`POST /v1/pairings`、`POST /v1/pairings/<id>/redeem`及全部pairing/bootstrap state。
+
+### Ensure, owner authority and cleanup clean cut
+
+- trusted in-process ensure success clean cut为`{descriptor,snapshot}`，不返回ViewerAccess；既有idempotencyKey/device binding/record retention保持。control ensure serialized value仍为`{deviceRef,descriptor,snapshot}`。
+- `RuntimeInstance.features`改为`['wait-v1','auto-bootstrap-v1']`。clean-cut删除`POST /v1/viewer/approve`、RuntimeOwnerControl/owner-local approve method、ViewerGrant coordinator字段及application ControlError unauthorized；owner bearer只保留shutdown和maintenance，ordinary bearer访问owner route仍401。
+- stop、device failure、Runtime shutdown、generation replacement和policy violation在统一终止前revoke permit、claim/media cookie、pending delivery及raw wrappers；cleanup failure不覆盖first terminal cause。lost stop仍inspect原StreamId；Adapter不自动重试mutation。
+- secret原值仅存non-enumerable/redacted wrapper并尽可能只留context-bound digest；permit/cookie/grant/credential不得进入Agent/model/MCP/CLI/URI/log/argv/env/persistence。授权/session各阶段在authenticated visible demand前`Capture.open=0`。
+
+### Required verification and real acceptance
+
+- deterministic测试覆盖30000ms deadline-1/exact/late callback、wall jump、所有pending/delivering/session-issued expiry/DELETE、repeat/concurrent ensure、expired re-arm、pre/post-linearization cancel、stop/generation ABA、first-browser race、HTML/session finish/rollback、valid/stale cookie reload、refresh/grace/revoke和每条cleanup counter。
+- HTTP测试覆盖native/user-activated navigation、Host/Origin/Fetch-User/Site/Mode/Dest、iframe/prefetch/prerender、cookie组合/duplicate/stale clearing、404/401/409/429及removed route零可达。
+- 真实macOS Android入口由installed CLI、一个legacy和modern MCP链分别完成zero-code fresh/reattach ensure、first fresh Live、rotation/quality、response loss、TTL/rollback、refresh/grace、stop/new StreamId、restart旧claim失效、owner shutdown、privacy及global ADB/device settings存活；verified Host register保持空。

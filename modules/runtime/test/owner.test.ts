@@ -7,14 +7,11 @@ import { inspect } from "node:util";
 import test from "node:test";
 import {
   CONTROL_VERSION,
-  validateStreamId,
   controlError,
-  type ApproveViewerValue,
   type ControlResult,
   type DeviceRef,
   type RuntimeTarget,
   type ShutdownRuntimeValue,
-  type StreamSnapshot,
 } from "../../contracts/src/index.js";
 import { LocalRuntimeState, controlStateInternals, type AndroidRuntimeSlot, type LocalRuntimeStateStage, type RuntimeGenerationState } from "../src/control-state.js";
 import {
@@ -49,19 +46,11 @@ function generation(slot: AndroidRuntimeSlot): RuntimeGenerationState {
   return Object.freeze({ runtimeStateVersion: 1, deviceRef: slot.deviceRef, instanceId: randomUUID(), generation: randomUUID(), port: slot.control.port, createdAt: NOW + 1, ready: true });
 }
 function live(slot: AndroidRuntimeSlot, target: RuntimeTarget) {
-  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1"] as const) }) }) });
+  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) }) }) });
 }
-function stopped(slot: AndroidRuntimeSlot, streamId: string = randomUUID()): StreamSnapshot {
-  return Object.freeze({ streamId, deviceRef: slot.deviceRef, revision: 2, phase: "stopped" as const, reason: "explicit-stop" as const, activeViewerCount: 0 as const, updatedAt: NOW + 2 });
-}
-function fakeOwner(target: RuntimeTarget, slot: AndroidRuntimeSlot, calls: unknown[]) {
+function fakeOwner(target: RuntimeTarget, _slot: AndroidRuntimeSlot, calls: unknown[]) {
   let closed = false;
   return {
-    async approveViewerPairing(input: Readonly<{ streamId: string; pairingCode: string }>): Promise<ControlResult<ApproveViewerValue>> {
-      calls.push(Object.freeze({ operation: "approve", input }));
-      if (closed) return Object.freeze({ ok: false, error: controlError("runtime-exited") });
-      return Object.freeze({ ok: true, value: Object.freeze({ snapshot: stopped(slot, validateStreamId(input.streamId)), approvedAt: NOW + 3 }) });
-    },
     async shutdownRuntime(input: RuntimeTarget): Promise<ControlResult<ShutdownRuntimeValue>> {
       calls.push(Object.freeze({ operation: "shutdown", input }));
       if (closed) return Object.freeze({ ok: false, error: controlError("runtime-exited") });
@@ -95,7 +84,7 @@ await test("owner-local is dedicated and ordinary Runtime exports no maintenance
     assert.deepEqual(Object.keys(owner), []);
     assert.equal(JSON.stringify(owner), "{}");
     assert.deepEqual(inspect(owner), "{}");
-    for (const method of ["inspectLocalState", "approveViewerPairing", "shutdownRuntime", "resetControlState", "rebindDevice", "close"]) assert.equal(typeof owner[method as keyof RuntimeOwnerLocal], "function");
+    for (const method of ["inspectLocalState", "shutdownRuntime", "resetControlState", "rebindDevice", "close"]) assert.equal(typeof owner[method as keyof RuntimeOwnerLocal], "function");
   } finally { await owner.close(); }
 });
 
@@ -163,20 +152,14 @@ await test("status fails closed for corrupt generation, wrong authority, timeout
   } finally { await f.close(); }
 });
 
-await test("approve and shutdown revalidate full DeviceRef and bind the authenticated current target", async () => {
+await test("shutdown revalidates full DeviceRef and binds the authenticated current target", async () => {
   const f = await fixture(), slot = f.slot!, target = Object.freeze({ instanceId: randomUUID(), generation: randomUUID() }), record = generation(slot), calls: unknown[] = [];
   await f.state.publishGeneration(Object.freeze({ ...record, instanceId: target.instanceId, generation: target.generation }));
   const owner = ownerFor(f.state, { hello: async (candidate, expected) => { assert.deepEqual(expected, target); return live(candidate, target); }, owner: (candidate, current) => fakeOwner(current, candidate, calls) });
   try {
-    const streamId = randomUUID(), approved = await owner.approveViewerPairing({ deviceRef: slot.deviceRef, streamId, pairingCode: "ABCDEFGH" });
-    assert.ok(approved.ok);
-    if (approved.ok) { assert.equal(approved.value.snapshot.streamId, streamId); assert.equal(Object.isFrozen(approved.value.snapshot.deviceRef), true); }
     const shutdown = await owner.shutdownRuntime({ deviceRef: slot.deviceRef });
     assert.deepEqual(shutdown, { ok: true, value: target });
-    assert.deepEqual(calls, [
-      { operation: "approve", input: { streamId, pairingCode: "ABCDEFGH" } }, "close",
-      { operation: "shutdown", input: target }, "close",
-    ]);
+    assert.deepEqual(calls, [{ operation: "shutdown", input: target }, "close"]);
     const wrong = Object.freeze({ ...slot.deviceRef, opaqueId: randomUUID() });
     assert.equal((await owner.shutdownRuntime({ deviceRef: wrong })).ok, false);
   } finally { await owner.close(); await f.close(); }
@@ -199,12 +182,10 @@ await test("owner operations fence a slot replacement between hello and route di
   } finally { await owner.close(); await f.close(); }
 });
 
-await test("approve and shutdown never repair or start an absent Runtime", async () => {
+await test("shutdown never repairs or starts an absent Runtime", async () => {
   const f = await fixture(), owner = ownerFor(f.state);
   try {
-    const approved = await owner.approveViewerPairing({ deviceRef: f.slot!.deviceRef, streamId: randomUUID(), pairingCode: "ABCDEFGH" });
     const shutdown = await owner.shutdownRuntime({ deviceRef: f.slot!.deviceRef });
-    assert.equal(approved.ok ? "" : approved.error.code, "instance-not-found");
     assert.equal(shutdown.ok ? "" : shutdown.error.code, "instance-not-found");
     assert.equal(await f.state.readGeneration(f.slot!), undefined);
   } finally { await owner.close(); await f.close(); }
@@ -343,7 +324,6 @@ await test("invalid local shapes fail before state, resolver, or owner I/O", asy
   try {
     for (const result of [
       await owner.inspectLocalState({ platform: "ios" } as never),
-      await owner.approveViewerPairing({ deviceRef: f.slot!.deviceRef, streamId: "bad", pairingCode: "ABCDEFGH" }),
       await owner.resetControlState({ platform: "android", expectedDeviceRef: f.slot!.deviceRef, expectedStateRevision: 0 }),
       await owner.rebindDevice({ platform: "android", expectedDeviceRef: f.slot!.deviceRef, expectedStateRevision: 1 }, { signal: {} as AbortSignal }),
     ]) assert.equal(result.ok ? "" : result.error.code, "malformed-control");

@@ -1,10 +1,10 @@
 # FSQ_scrcpy 项目级适配；模型、审批、沙箱与执行权限沿用宿主配置。
 developer_instructions = """
-主会话承担 tech-lead。开始项目任务前完整读取根 AGENTS.md、SPEC.md 和 .github/agents/tech-lead.agent.md。
+主会话承担 tech-lead。普通项目任务先读取根 AGENTS.md；显式工作流再读取对应 skill、tech-lead 角色和任务包列出的 activeInputs，不默认完整加载 SPEC 或历史材料。
 根 AGENTS.md 的显式授权规则优先；加载配置或提及技能不启动 SDD，也不授权产品写入。
 需要委派时直接分配 product-lead、architect、scrcpy-expert、streaming-engineer、agent-integration-engineer 或 quality-engineer；禁止委派 tech-lead 子角色或让叶角色嵌套委派。
-派发前读取固定证据并核验哈希；子角色首个实际工具批次必须读取根规则、固定 SPEC、角色正文和任务包。研究/审查探针只读，工程探针只写任务包指定临时文件。
-独立审查必须使用未参与本批实现或测试编写的新上下文，完整读取并核验 SPEC、任务包、完整差异及身份；不可用时报告 audit-blocked。
+子角色首批读取根规则、角色正文和固定任务包，核验身份后只读取 `activeInputs` selectors。研究/审查只读，工程探针只写任务包指定临时文件。
+独立审查必须使用未参与本批实现或测试编写的新上下文，读取 active SPEC selectors、完整 Feature 差异及身份；不可用时报告 audit-blocked。
 缺入口、哈希不符或角色只发能力声明时停止该子任务，不猜工具名、不循环催促或反复重建。
 """
 

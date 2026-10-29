@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { inspect } from "node:util";
 import test from "node:test";
 import {
-  ContractValidationError, STREAM_PHASES, createViewerAccess, revealViewerGrant, validateDeviceRef,
-  validateSize, validateStreamError, validateStreamId, validateStreamSnapshot, validateViewerDescriptor
+  ContractValidationError, STREAM_PHASES, validateDeviceRef, validateSize, validateStreamError,
+  validateStreamId, validateStreamSnapshot, validateViewerDescriptor
 } from "../src/index.js";
 
 const id = "123e4567-e89b-42d3-a456-426614174000";
@@ -122,9 +121,6 @@ test("all error metadata and identity/URI/grant boundaries are exact", () => {
   for (const namespace of ["", `a${"b".repeat(64)}`]) invalid(() => validateDeviceRef({ ...device, namespace }));
   for (const port of [1, 65535]) assert.equal(validateViewerDescriptor({ ...descriptor, standaloneUri: `http://127.0.0.1:${port}/viewer/${id}` }).streamId, id);
   for (const port of [0, 65536]) invalid(() => validateViewerDescriptor({ ...descriptor, standaloneUri: `http://127.0.0.1:${port}/viewer/${id}` }));
-  assert.equal(revealViewerGrant(createViewerAccess(descriptor, "A".repeat(22)).viewerGrant).length, 22);
-  assert.equal(revealViewerGrant(createViewerAccess(descriptor, "A".repeat(2048)).viewerGrant).length, 2048);
-  invalid(() => createViewerAccess(descriptor, "A".repeat(2050)));
   const max = Number.MAX_SAFE_INTEGER;
   for (const revision of [1, max]) assert.equal(validateStreamSnapshot({ ...snapshot, revision }).revision, revision);
   for (const revision of [0, max + 1]) invalid(() => validateStreamSnapshot({ ...snapshot, revision }));
@@ -142,21 +138,8 @@ test("exported phases are immutable and cannot change validation", () => {
   invalid(() => validateStreamSnapshot({ ...snapshot, phase: "rogue" }));
 });
 
-test("ViewerAccess exposes the descriptor while keeping grant secret", () => {
-  const raw = "AAAAAAAAAAAAAAAAAAAAAA";
-  const access = createViewerAccess(descriptor, raw);
-  assert.deepEqual(Object.keys(access), ["descriptor"]);
-  assert.deepEqual(Object.getOwnPropertySymbols(access), [Symbol.for("nodejs.util.inspect.custom")]);
-  assert.equal(Object.getOwnPropertyDescriptor(access, "viewerGrant")?.enumerable, false);
-  assert.equal(Object.isFrozen(access), true);
-  assert.equal(Object.isFrozen(access.descriptor), true);
-  assert.equal(Object.isFrozen(access.descriptor.presentationModes), true);
-  assert.equal(String(access.viewerGrant), "[REDACTED]");
-  assert.equal(JSON.stringify(access.viewerGrant), '"[REDACTED]"');
-  assert.equal(JSON.stringify(access), JSON.stringify({ descriptor: access.descriptor }));
-  assert.equal(inspect(access.viewerGrant), "[REDACTED]");
-  assert.equal(inspect(access).includes(raw), false);
-  assert.equal(revealViewerGrant(access.viewerGrant), raw);
-  invalid(() => createViewerAccess(descriptor, "short"));
-  invalid(() => createViewerAccess(descriptor, "AAAAAAAAAAAAAAAAAAAAAB"));
+
+test("legacy viewer authorization exports are absent", async () => {
+  const contracts = await import("../src/index.js");
+  for (const name of ["createViewerAccess", "revealViewerGrant", "validateApproveViewerValue"]) assert.equal(name in contracts, false);
 });

@@ -34,7 +34,6 @@ Public serialized values、错误和状态语义由下方 Contracts v1 定义；
 - `DeviceRef`: `{ contractVersion: 1, platform: "android", namespace: string, opaqueId: string }`. `opaqueId` is an opaque identifier and is never an ADB serial, path, port, PID or third-party object.
 - `StreamId`: lowercase UUID string generated once per logical stream. Rotation keeps it; every terminal stream and every explicit retry receives a new ID.
 - `ViewerDescriptor`: `{ contractVersion: 1, streamId, standaloneUri, presentationModes: ["standalone"], expiresAt }`. It is non-secret and safe to log. MCP fields are not part of v1.
-- `ViewerAccess`: `{ descriptor, viewerGrant }`; `viewerGrant` is secret, audience/stream/instance/expiry-bound and excluded from ordinary serialization, model output, error messages, persisted history, logs, process arguments and telemetry.
 - `StreamSnapshot`: `{ streamId, deviceRef, revision, phase, reason?, epoch?, codedSize?, displaySize?, activeViewerCount, updatedAt }`; `revision` strictly increases.
 - `StreamError`: `{ code, scope, disposition, safeMessage, retryAfter? }`. `scope` is `service`, `capture`, `stream`, `viewer`, `presentation` or `acceptance`; `disposition` is `recoverable`, `terminal` or `state-unknown`. Additional fields are rejected.
 
@@ -69,10 +68,10 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 | `runtime-overload` | stream | terminal | `failed` | `failed` | no |
 | `stream-interrupted` | stream | state-unknown | `interrupted`, then `failed` or `device-disconnected` | final classified reason | no in v1 |
 | `device-disconnected` | capture | terminal | `device-disconnected` | `device-disconnected` | no |
-| `slow-consumer` | viewer | terminal | stream unchanged or `grace` if last Viewer | none | Viewer may pair again within stream policy |
+| `slow-consumer` | viewer | terminal | stream unchanged or `grace` if last Viewer | none | same media session may reconnect within grace; otherwise authenticated Agent ensure/show Viewer after slot release |
 | `viewer-unsupported` | viewer | terminal | stream unchanged or `grace` | none | no on same surface |
 | `viewer-limit-reached` | viewer | terminal | existing stream unchanged | none | after existing Viewer leaves |
-| `unauthorized` | viewer | terminal | existing stream unchanged | none | obtain a new pairing grant |
+| `unauthorized` | viewer | terminal | existing stream unchanged | none | authenticated Agent再次ensure并重新展示Viewer |
 | `presentation-blocked` | presentation | recoverable | stream unchanged | none | use protected standalone presentation |
 | `acceptance-failed` | acceptance | terminal | stream stops normally or `failed` | matching operational reason | no support claim |
 
@@ -81,10 +80,10 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 ### Compatibility and secret lifetimes
 
 - Media protocol major is `1`; unknown majors fail closed. Minor additions must preserve required fields and semantics. No external launch/attach control protocol is part of the current contract.
-- Browser-visible pairing code is exactly eight uppercase Crockford Base32 characters excluding `I`, `L`, `O` and `U`, generated independently from CSPRNG output. It is a human comparison value, not a bearer: bound to one pending pairing/instance/StreamId/browser session, limited to five failed comparisons, single-use and expired after 60 seconds.
-- ViewerGrant, bootstrap grant and media-session tokens are independent unpadded base64url values with at least 128 CSPRNG bits, stored only as context-bound constant-time comparison material and revoked on stop, Runtime exit or policy violation.
+- Auto-bootstrap permit与claim/media-session token相互独立；permit恰为30000ms monotonic状态且不序列化，claim/media token为context-bound CSPRNG值并尽可能只存digest。
+- Claim和media-session token从不进入公共DTO；media session仍绑定instance/StreamId/audience、具有60秒reconnect TTL，并在stop、Runtime exit或policy violation时撤销。
 - The authenticated media session is bound to instance/StreamId/audience, has a 60-second reconnect TTL, and is revoked on stop, Runtime exit or policy violation. Visible-demand renewal occurs at least every 2 seconds; the server-authoritative lease expires 5 seconds after the last valid visible renewal.
-- Current v1 allows exactly one active Viewer; a second request fails before grant, lease or queue allocation. Any multi-Viewer or MCP contract requires a new SPEC delta.
+- Current v1 allows exactly one active Viewer; a second request fails before claim, lease or queue allocation. Any multi-Viewer or MCP App contract requires a new SPEC delta.
 - Only a freshly painted frame permits the Viewer to present `Live`.
 
 ## v1 Serialization and Secret-Safety Rules
@@ -95,8 +94,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 - Serialized `Size` is exactly `{ width, height }`, where both values are integers in `1..4294967295`. `revision` is an integer in `1..Number.MAX_SAFE_INTEGER`; optional `epoch` has the same positive range; `activeViewerCount` is exactly `0` or `1`.
 - `StreamSnapshot.reason`, when present, is a current error `code`, `explicit-stop` or `lease-expired`. It is absent from nonterminal snapshots except `stream-interrupted` while phase is `interrupted`; terminal phase/reason consistency follows the error table and END mapping.
 - `StreamError.safeMessage` is NFC-normalized UTF-8 text of 1..512 bytes with no C0/C1 control, line-separator or paragraph-separator code point. It contains no secret, device locator, path, stack or third-party error object. Current v1 rejects `retryAfter` and any additional key.
-- `standaloneUri` is exactly `http://127.0.0.1:<port>/viewer/<streamId>`, where port is decimal `1..65535` with no leading zero and `streamId` is the descriptor's canonical ID. Username, password, query, fragment, percent-encoding, alternate host/path and pairing secrets are forbidden.
-- A Viewer grant's wire value is unpadded base64url ASCII, 22..2048 characters, created from at least 128 CSPRNG bits. The Contracts factory stores the raw immutable string only in an ECMAScript private field of a frozen grant wrapper; ordinary property/symbol enumeration cannot reach it. String/default primitive conversion, `toJSON()` and `Symbol.for("nodejs.util.inspect.custom")` return `[REDACTED]`; only an explicitly named reveal operation at the protected owner boundary returns the raw value. The factory returns a frozen `ViewerAccess`: its deeply frozen `descriptor` is enumerable, its frozen grant wrapper is readable but non-enumerable/non-writable/non-configurable, `toJSON()` returns exactly `{ descriptor }`, and the Node inspect hook shows the descriptor plus a redacted grant.
+- `standaloneUri` is exactly `http://127.0.0.1:<port>/viewer/<streamId>`, where port is decimal `1..65535` with no leading zero and `streamId` is the descriptor's canonical ID. Username, password, query, fragment, percent-encoding, alternate host/path and authorization secrets are forbidden.
 - Media header `sequence`, `epoch` and `ptsUs` are represented as `bigint`; fixed-width number fields remain integers in their specified unsigned ranges. The current decoder accepts only major `1`, minor `0`, `headerBytes=40` and known kinds/flags. An unknown minor fails closed today. A future minor decoder may accept earlier minors, but no minor may reinterpret an existing field, kind or required semantic.
 
 ## iOS WDA Standalone Contract
@@ -130,10 +128,10 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 - `ControlVersion`恰好为 `{major:1,minor:0}`；与Contracts `contractVersion:2`和FSQV media版本独立。`RuntimeTarget`恰好为 `{instanceId,generation}`，两者都是canonical non-nil RFC4122 variant-1/version-4 UUID。
 - `DeviceSelector`恰好为 `{kind:"auto",platform:"android"}` 或 `{kind:"known",deviceRef:DeviceRef}`；额外字段、iOS/未知platform和错误prototype拒绝。auto允许首次生成或复用安全DeviceRef；known从不生成、重映射或修改identity。
-- `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:["wait-v1"]}`；feature tuple deep-frozen且不接受空/额外/未知值。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
-- `HelloControlValue`恰好为 `{instance:RuntimeInstance}`。`EnsureViewerValue`恰好为 `{deviceRef,descriptor:ViewerDescriptor,snapshot:StreamSnapshot}`。`InspectControlValue`恰好为 `{snapshot,changes,reset,timedOut}`。`StopStreamValue`恰好为 `{snapshot}`。owner-only `ApproveViewerValue`恰好为 `{snapshot,approvedAt}`；`approvedAt`是`0..Number.MAX_SAFE_INTEGER`的integer Unix epoch milliseconds。owner-only `ShutdownRuntimeValue`恰好为 `{instanceId,generation}`。
+- `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:["wait-v1","auto-bootstrap-v1"]}`；feature tuple deep-frozen且不接受空/旧/额外/重复/未知/乱序值。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
+- `HelloControlValue`恰好为 `{instance:RuntimeInstance}`。`EnsureViewerValue`恰好为 `{deviceRef,descriptor:ViewerDescriptor,snapshot:StreamSnapshot}`。`InspectControlValue`恰好为 `{snapshot,changes,reset,timedOut}`。`StopStreamValue`恰好为 `{snapshot}`。owner-only `ShutdownRuntimeValue`恰好为 `{instanceId,generation}`。
 - `ControlWireValue`只包含本节列出的plain serialized values。generic `ControlResult<T extends ControlWireValue>`恰好为 `{ok:true,value:T}|{ok:false,error:ControlError}`。只有stop expectedRevision mismatch使用 `{ok:false,error:RevisionConflictError,snapshot:StreamSnapshot}`；任何其他失败禁止`snapshot`。
-- `RuntimeControlSession`、control/owner methods、`AbortSignal`、socket、credential、ViewerGrant、pairingId及provider object不是`ControlWireValue`，不得传给generic serializer。Runtime本地成功acquire类型必须使用独立的`{ok:true,session:RuntimeControlSession}`分支，不能把含方法的session放入serialized `ControlResult`。
+- `RuntimeControlSession`、control/owner methods、`AbortSignal`、socket、credential、permit、claim/media cookie及provider object不是`ControlWireValue`，不得传给generic serializer。Runtime本地成功acquire类型必须使用独立的`{ok:true,session:RuntimeControlSession}`分支。
 - local session的唯一enumerable own property是深冻结`attachment`；control保存于ECMAScript private field并由prototype getter取得。`Object.keys`、ordinary/symbol enumeration只能看见`attachment`；`toValue()`和`toJSON()`恰好返回深冻结`{attachment}`；Node custom inspect恰好显示`{attachment}`。普通`RuntimeControlSession`从不持有或暴露owner control。
 
 ### Canonical Control JSON
@@ -141,7 +139,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 - control request/response body使用`CanonicalControlJson`：UTF-8、无BOM、无前后空白、无insignificant whitespace、一个top-level object、无duplicate key。只接受ordinary object或null-prototype object；拒绝array作为top level、非finite/coerced/exponent/negative-zero number、错误prototype、accessor、symbol和额外字段。
 - encoder等价于对已严格验证且按下列固定key order构造的plain DTO执行ECMAScript `JSON.stringify`，再以UTF-8编码。client发送的bytes经strict parse和相同encoder重新编码后必须逐byte相等；否则为`malformed-control`。`Content-Length`、12KiB changes与16KiB body limit均只计body的实际UTF-8 octets，不计headers。
 - 固定nested key order为：`ControlVersion: major,minor`；`RuntimeTarget: instanceId,generation`；`DeviceRef: contractVersion,platform,namespace,opaqueId`；`RuntimeInstance: controlVersion,instanceId,generation,contractVersion,deviceRef,features`；`RuntimeAttachment: disposition,instance`；`ControlError: controlVersion,code,disposition,operationState,safeMessage`；`RevisionConflictError`同顺序并以`code`置于`controlVersion`后。`ViewerDescriptor`、`StreamSnapshot`及其nested `Size`沿用Contracts v2声明的field order；合法optional field缺失时省略，wire request中下文声明为nullable的field必须出现且使用`null`，不得省略。
-- top-level result key order恰好为success `ok,value`、ordinary failure `ok,error`、revision conflict `ok,error,snapshot`。array保持语义顺序；`features`恰好为`["wait-v1"]`；InspectControlValue固定order为`snapshot,changes,reset,timedOut`。
+- top-level result key order恰好为success `ok,value`、ordinary failure `ok,error`、revision conflict `ok,error,snapshot`。array保持语义顺序；`features`恰好为`["wait-v1","auto-bootstrap-v1"]`；InspectControlValue固定order为`snapshot,changes,reset,timedOut`。
 - Inspect/wait normalizer最多16个`changes`，canonical `changes` array最多12288 bytes，完整canonical response body最多16384 bytes。任一cap超出不得切prefix，改为`{snapshot:current,changes:[],reset:true,timedOut:false}`；fallback仍超16384时返回runtime-overload。边界值16、12288和16384允许，任一超过1即不允许。
 
 ### Exact control errors
@@ -153,7 +151,6 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 | `instance-not-found` | `recoverable` | `not-applied` | `No matching Runtime is available.` | 404 | attach-only无listener，或known slot不存在 |
 | `instance-conflict` | `terminal` | `not-applied` | `The Runtime identity does not match.` | 409 | authenticated DeviceRef/target/full generation不匹配 |
 | `control-version-mismatch` | `terminal` | `not-applied` | `The RuntimeControl version is incompatible.` | 409 | control major/minor或Contracts version不兼容 |
-| `unauthorized` | `terminal` | `not-applied` | `Authorization failed.` | 401 | ensure owner grant已过期；approve pending/code/grant无效。wire bearer失败使用固定transport 401，不产生identity-bearing body |
 | `malformed-control` | `terminal` | `not-applied` | `The control request is invalid.` | 400 | canonical/schema/value/unknown stream/非法revision失败 |
 | `deadline-exceeded` | `state-unknown` | `unknown` | `The control operation deadline was exceeded; its outcome is unknown.` | 504/local | dispatch、readiness或mutation可能已线性化后，response budget或cancel先结束本地等待 |
 | `request-cancelled` | `recoverable` | `not-applied` | `The control request was cancelled before it was applied.` | local | 能证明spawn/readiness/mutation线性化前取消获胜 |
@@ -169,16 +166,16 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 | `local-state-recovery-required` | `terminal` | `not-applied` | `Local Runtime state requires owner recovery.` | 409 | persistent corruption、credential/state不一致或occupied port ownership不确定 |
 
 - `RevisionConflictError`恰好为 `{controlVersion,code:"revision-conflict",disposition:"recoverable",operationState:"not-applied",safeMessage:"The expected revision does not match."}`，HTTP 409且必须携带unchanged current snapshot；任何其他error禁止snapshot。
-- Capture resolver七个fixed errors逐code、逐safeMessage映射，不包装原异常。现有in-process ensure的`malformed-control|runtime-overload|unauthorized`同名映射；inspect unknown stream/afterRevision非法映射`malformed-control`；stop expectedRevision mismatch唯一映射`revision-conflict`。Runtime control startup bind失败不向union新增`runtime-bind-failed`，而按是否存在可协调listener映射`instance-conflict|runtime-exited|local-state-recovery-required`。
-- 所有值沿用Contracts v2 canonical UUID/time/size/string安全规则；control值不得含provider、serial、endpoint、path、PID、root/client/owner credential、ViewerGrant、pairingId、cookie、media或Appium Session字段。
+- Capture resolver七个fixed errors逐code、逐safeMessage映射，不包装原异常。现有in-process ensure只映射`malformed-control|runtime-overload`；inspect unknown stream/afterRevision非法映射`malformed-control`；stop expectedRevision mismatch唯一映射`revision-conflict`。Runtime control startup bind失败按是否存在可协调listener映射`instance-conflict|runtime-exited|local-state-recovery-required`。
+- 所有值沿用Contracts v2 canonical UUID/time/size/string安全规则；control值不得含provider、serial、endpoint、path、PID、root/client/owner credential、permit、claim/media cookie、media或Appium Session字段。
 
 ## RuntimeControl Bounded Wait v1
 
-本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` Contracts clean cutover；`features:["wait-v1"]`、四字段inspect和wait接口成为active契约。
+本节定义已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` Contracts基础；11B clean cut后`features:["wait-v1","auto-bootstrap-v1"]`与四字段inspect/wait共同构成active契约。
 
 ### Exact values and feature cutover
 
-- `ControlVersion`保持exact `{major:1,minor:0}`。`RuntimeInstance.features`一次性改为deep-frozen exact tuple `["wait-v1"]`；`[]`、额外、重复、未知或乱序feature全部拒绝，不保留alias/shim/fallback。新client对authenticated旧Runtime的`features:[]`返回既有`control-version-mismatch`，不得inspect轮询降级、kill或替换旧Runtime；owner显式shutdown/restart是唯一cutover路径。
+- `ControlVersion`保持exact `{major:1,minor:0}`。`RuntimeInstance.features`为deep-frozen exact tuple `["wait-v1","auto-bootstrap-v1"]`；旧`["wait-v1"]`、空、额外、重复、未知或乱序全部拒绝，不保留alias/shim/fallback。新client对旧Runtime返回`control-version-mismatch`，不得轮询降级、kill或替换；owner显式shutdown/restart是唯一cutover路径。
 - `InspectControlValue` clean cutover为exact `{snapshot,changes,reset,timedOut}`，固定key order同此顺序。inspect成功总是`timedOut:false`；wait的change/reset/terminal成功也为false。`reset:true`要求`changes=[] && timedOut:false`；`timedOut:true`要求`changes=[] && reset:false`；非空changes要求两者均false。
 - ordinary `RuntimeControl`在inspect与stopStream之间新增`wait({streamId,afterRevision,waitMs},{signal?}) -> Promise<ControlResult<InspectControlValue>>`。input为exact plain readonly三字段；afterRevision为正safe integer，waitMs为`0..30000` safe integer；拒绝negative-zero、coercion、fraction、额外字段。AbortSignal仍仅local且不序列化；session enumeration/JSON/inspect及owner authority边界不变。
 
@@ -193,5 +190,29 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 ### Required contract verification
 
-- Clean cutover覆盖`["wait-v1"]`与旧/额外feature拒绝、四字段exact validator/canonical round-trip、wait request order、0/30000及非法边界、current/older/future/reset/terminal/timeout互斥、16/17 changes、12288/16384±1 bytes和无prefix fallback。
-- RuntimeControlSession必须证明wait仅在control prototype、serialized session仍只有attachment、close/cancel只结束wait且不改变stream/Runtime。既有Integrations调用方必须迁移：viewer ensure输出exact `features:["wait-v1"]`，stream inspect输出`timedOut:false`并保持human/JSON parity；除这两个Contracts clean-cutover字段外，Capture/Viewer/Integrations serialized产品面无额外字段，且CLI命令面不得出现stream wait/watch。
+- Clean cutover覆盖`["wait-v1","auto-bootstrap-v1"]`与旧/额外feature拒绝、四字段exact validator/canonical round-trip、wait request order、0/30000及非法边界、current/older/future/reset/terminal/timeout互斥、16/17 changes、12288/16384±1 bytes和无prefix fallback。
+- RuntimeControlSession必须证明wait仅在control prototype、serialized session仍只有attachment、close/cancel只结束wait且不改变stream/Runtime。Integrations调用方输出exact新feature tuple与四字段inspect；Capture/Viewer serialized产品面无额外字段。
+
+## Agent Auto-Bootstrap Contract
+
+本节定义 `AGENT-AUTO-VIEWER-BOOTSTRAP-MACOS-ANDROID-11B` 的 Contracts clean cut，并与Root/Runtime/Viewer/Integrations同名条款共同构成active契约。
+
+### Exact retained values and feature tuple
+
+- `ViewerDescriptor` serialized shape、canonical key order及URI规则不变；`expiresAt`改为当前 auto-bootstrap permit 的wall-clock描述，不能延长30000ms monotonic deadline，也不是bearer。
+- serialized `EnsureViewerValue`仍恰为 `{deviceRef,descriptor,snapshot}`，因此 AgentControl、MCP四工具和CLI ensure result shape不变。
+- `RuntimeInstance.features` clean cut为deep-frozen exact tuple `['wait-v1','auto-bootstrap-v1']`。旧`['wait-v1']`、空、缺失、额外、重复、未知或乱序tuple均为`control-version-mismatch`；不保留feature alias、fallback或upgrade shim。
+- `DeviceRef`、StreamId、StreamSnapshot、ViewerDescriptor、ControlVersion、RuntimeTarget、RuntimeAttachment、Inspect/Wait/Stop/Shutdown values及媒体契约no-delta。
+
+### Removed authority and error surface
+
+- `ViewerGrant`、`ViewerAccess`、`ApproveViewerValue` 及其factory、reveal、validator、canonical order、generic union和export已删除。任何local或serialized成功ensure不得包含grant/access wrapper。
+- application `ControlError` code `unauthorized` 的tuple、validator、canonical encoder和route allow-set已删除；ControlError其他tuple与`RevisionConflictError`不变。浏览器/transport固定HTTP 401及`StreamError unauthorized`继续存在。
+- 保留的 `StreamError unauthorized`仍为viewer/terminal且不授予owner authority；Same-StreamId恢复恰为authenticated Agent再次ensure并重新展示Viewer，不生成pairing surface。
+- owner-only `ShutdownRuntimeValue`保留；owner approve value不存在。ControlWireValue、local session和ordinary RuntimeControl不得携带permit、claim/media cookie、digest或ViewerAuthorization object。
+- Runtime in-process `EnsureResult`恰为 `{ok:true,value:{descriptor:ViewerDescriptor,snapshot:StreamSnapshot}}|{ok:false,error:StreamError}`；控制面外部 `EnsureViewerValue` 仍保持safe shape。
+
+### Verification
+
+- Contracts验收覆盖exact feature tuple/canonical round-trip与旧tuple拒绝；removed exports/types/validators不可导入或反射；ensure/descriptor shape不变且不含secret；ControlError unauthorized拒绝而browser/StreamError unauthorized继续有效。
+- 所有生产调用方、fixture和测试必须同批迁移；任何兼容re-export、deprecated alias、optional旧字段或双validator均失败。

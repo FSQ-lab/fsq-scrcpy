@@ -23,7 +23,7 @@ const NEXT = "523e4567-e89b-42d3-a456-426614174000";
 const DEVICE: DeviceRef = Object.freeze({ contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: ID });
 const NEXT_DEVICE: DeviceRef = Object.freeze({ ...DEVICE, opaqueId: NEXT });
 const SNAPSHOT: StreamSnapshot = Object.freeze({ streamId: STREAM, deviceRef: DEVICE, revision: 1, phase: "demand-pending", activeViewerCount: 0, updatedAt: 1 });
-const ATTACHMENT: RuntimeAttachment = Object.freeze({ disposition: "attached", instance: Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: INSTANCE, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1"] as const) }) });
+const ATTACHMENT: RuntimeAttachment = Object.freeze({ disposition: "attached", instance: Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: INSTANCE, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) }) });
 const STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ platform: "android" as const, state: "ready" as const, deviceRef: DEVICE, stateRevision: 7, runtime: Object.freeze({ state: "not-running" as const }) }) });
 const LIVE_STATUS = Object.freeze({ ok: true as const, value: Object.freeze({ ...STATUS.value, runtime: Object.freeze({ state: "live" as const, target: Object.freeze({ instanceId: INSTANCE, generation: GENERATION }) }) }) });
 const UNINITIALIZED = Object.freeze({ ok: true as const, value: Object.freeze({ platform: "android" as const, state: "uninitialized" as const }) });
@@ -32,7 +32,7 @@ const snapshot = (revision: number, phase: StreamSnapshot["phase"] = "demand-pen
 const observed = (value: StreamSnapshot, options: { timedOut?: boolean; reset?: boolean } = {}): unknown => ({ ok: true, value: { snapshot: value, changes: options.timedOut || options.reset ? [] : [value], reset: options.reset ?? false, timedOut: options.timedOut ?? false } });
 
 type Calls = { acquire: unknown[]; owner: string[]; control: string[]; closed: string[]; prompts: string[]; aborts: number };
-interface Fixture { runtime: CliRuntimeDependencies; calls: Calls; setStatus(value: unknown): void; setAcquire(value: unknown): void; setControl(name: "ensure" | "inspect" | "wait" | "stop", value: unknown): void; setOwner(name: "approve" | "shutdown" | "reset" | "rebind", value: unknown): void; throwAcquire(cause: unknown): void }
+interface Fixture { runtime: CliRuntimeDependencies; calls: Calls; setStatus(value: unknown): void; setAcquire(value: unknown): void; setControl(name: "ensure" | "inspect" | "wait" | "stop", value: unknown): void; setOwner(name: "shutdown" | "reset" | "rebind", value: unknown): void; throwAcquire(cause: unknown): void }
 function fixture(): Fixture {
   const calls: Calls = { acquire: [], owner: [], control: [], closed: [], prompts: [], aborts: 0 };
   let status: unknown = STATUS, acquireCause: unknown, acquireValue: unknown;
@@ -41,7 +41,6 @@ function fixture(): Fixture {
     inspect: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: false } },
     wait: { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false, timedOut: true } },
     stop: { ok: true, value: { snapshot: SNAPSHOT } },
-    approve: { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 2 } },
     shutdown: { ok: true, value: { instanceId: INSTANCE, generation: GENERATION } },
     reset: { ok: true, value: { platform: "android", deviceRef: DEVICE, previousStateRevision: 7, stateRevision: 8 } },
     rebind: { ok: true, value: { platform: "android", previousDeviceRef: DEVICE, deviceRef: NEXT_DEVICE, previousStateRevision: 7, stateRevision: 8 } },
@@ -58,7 +57,6 @@ function fixture(): Fixture {
   acquireValue = { ok: true, session };
   const owner: RuntimeOwnerLocal = {
     async inspectLocalState(_input, options) { calls.owner.push(`status:${Boolean(options?.signal)}`); return status as never; },
-    async approveViewerPairing(input, options) { calls.owner.push(`approve:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.approve as never; },
     async shutdownRuntime(input, options) { calls.owner.push(`shutdown:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.shutdown as never; },
     async resetControlState(input, options) { calls.owner.push(`reset:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.reset as never; },
     async rebindDevice(input, options) { calls.owner.push(`rebind:${JSON.stringify(input)}:${Boolean(options?.signal)}`); return values.rebind as never; },
@@ -113,7 +111,7 @@ await test("rejects every malformed grammar before product I/O with deterministi
     ["stream", "inspect", "--stream-id", STREAM, "--after-revision", "01"],
     ["stream", "inspect", "--stream-id", STREAM, "--after-revision", "9007199254740992"],
     ["stream", "stop", "--stream-id", STREAM, "--expected-revision", "-1"],
-    ["viewer", "approve", "--stream-id", STREAM, "--code", "ILOU1234"],
+    ["viewer", "approve", "--stream-id", STREAM, "--code", "01234567"],
     ["runtime", "shutdown", "--device-ref", ID.toUpperCase()],
     ["local-state", "status", "--platform", "android", "--unknown"],
     ["local-state", "reset-control", "--platform", "android"],
@@ -149,7 +147,7 @@ await test("maps auto and known ensure to the only allowed selectors and safe co
   assert.deepEqual(auto.calls.owner, []);
   assert.deepEqual(auto.calls.acquire[0], { request: { mode: "start-or-attach", selector: { kind: "auto", platform: "android" } }, signal: false });
   assert.deepEqual((auto.value.value as Record<string, unknown>).attachment, ATTACHMENT);
-  assert.deepEqual((((auto.value.value as Record<string, unknown>).attachment as RuntimeAttachment).instance.features), ["wait-v1"]);
+  assert.deepEqual((((auto.value.value as Record<string, unknown>).attachment as RuntimeAttachment).instance.features), ["wait-v1", "auto-bootstrap-v1"]);
   const known = await invoke(["viewer", "ensure", "--device-ref", ID, "--json"]);
   assert.equal(known.stdout.includes("\n  \""), false);
   assert.deepEqual(known.value, auto.value);
@@ -302,10 +300,10 @@ await test("failed records do not advance or issue a second provider wait", asyn
   assert.equal(failedRecord.calls.control.filter((call) => call.startsWith("wait:")).length, 1);
   assert.deepEqual(failedRecord.calls.closed, ["owner", "session"]);
 });
-await test("maps approve and shutdown only through owner-local lookup", async () => {
+await test("removed approve is invalid before owner creation while shutdown remains owner-only", async () => {
   const approve = await invoke(["viewer", "approve", "--stream-id", STREAM, "--code", "01234567"]);
-  assert.deepEqual(approve.calls.acquire, []);
-  assert.equal(approve.calls.owner[1], `approve:${JSON.stringify({ deviceRef: DEVICE, streamId: STREAM, pairingCode: "01234567" })}:false`);
+  assert.equal(approve.code, 2);
+  assert.deepEqual(approve.calls, { acquire: [], owner: [], control: [], closed: [], prompts: [], aborts: 0 });
   const shutdown = await invoke(["runtime", "shutdown", "--device-ref", ID]);
   assert.deepEqual(shutdown.calls.acquire, []);
   assert.equal(shutdown.calls.owner[1], `shutdown:${JSON.stringify({ deviceRef: DEVICE })}:false`);

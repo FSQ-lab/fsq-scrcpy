@@ -102,33 +102,6 @@ export function validateStreamSnapshot(value: unknown): StreamSnapshot {
   return value as StreamSnapshot;
 }
 
-const GRANT = /^[A-Za-z0-9_-]{22,2048}$/;
-const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-class Grant {
-  #raw: string;
-  constructor(raw: string) { this.#raw = raw; Object.freeze(this); }
-  static reveal(grant: Grant): string { return grant.#raw; }
-  toString(): string { return "[REDACTED]"; }
-  toJSON(): string { return "[REDACTED]"; }
-  [Symbol.toPrimitive](): string { return "[REDACTED]"; }
-}
-Object.defineProperty(Grant.prototype, Symbol.for("nodejs.util.inspect.custom"), { value: () => "[REDACTED]" });
-export type ViewerGrant = Grant;
-export interface ViewerAccess { readonly descriptor: ViewerDescriptor; readonly viewerGrant: ViewerGrant; toJSON(): { descriptor: ViewerDescriptor } }
-export function createViewerAccess(descriptorValue: unknown, rawGrant: unknown): ViewerAccess {
-  const source = validateViewerDescriptor(descriptorValue);
-  if (typeof rawGrant !== "string" || !GRANT.test(rawGrant) || rawGrant.length % 4 === 1) fail("ViewerGrant");
-  const grant = rawGrant as string, remainder = grant.length % 4, tail = ALPHABET.indexOf(grant.at(-1) ?? "");
-  if ((remainder === 2 && (tail & 15) !== 0) || (remainder === 3 && (tail & 3) !== 0)) fail("ViewerGrant");
-  const descriptor = Object.freeze({ ...source, presentationModes: Object.freeze(["standalone"] as const) });
-  const access = Object.defineProperties({ descriptor }, {
-    viewerGrant: { value: new Grant(grant), enumerable: false },
-    toJSON: { value: () => ({ descriptor }), enumerable: false },
-    [Symbol.for("nodejs.util.inspect.custom")]: { value: () => ({ descriptor, viewerGrant: "[REDACTED]" }), enumerable: false }
-  }) as ViewerAccess;
-  return Object.freeze(access);
-}
-export function revealViewerGrant(grant: ViewerGrant): string { return Grant.reveal(grant); }
 
 export const MEDIA_MAJOR = 1 as const, MEDIA_HEADER_BYTES = 40 as const;
 export const MAX_PAYLOAD_BYTES = 8_388_608 as const, MAX_CONFIG_BYTES = 262_144 as const, MAX_FRAME_BYTES = 8_126_464 as const;

@@ -33,8 +33,8 @@ Viewer 可依赖 Runtime 和 Contracts，不依赖 Capture 内部实现或 `Appi
 ## Standalone Viewer Contract v1
 
 - First acceptance surface is standalone Chrome on macOS. Compatibility is capability-based: H.264 Annex B WebCodecs, Web Worker, binary WebSocket and Canvas. Exact browser/OS versions are validation evidence.
-- Viewer uses the protected standalone pairing flow and never receives a reusable bearer in query strings, ordinary/model output, error messages, persisted history, logs, process arguments or telemetry. Standalone responses set `frame-ancestors 'none'` and a deny-by-default CSP: `default-src 'none'; script-src 'self'; style-src 'self'; worker-src 'self'; connect-src 'self' <exact-runtime-ws-origin>; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'`. Wildcards, remote CDN, broad schemes, blob/data image sources and inline eval are forbidden; video is rendered directly from `VideoFrame` to Canvas.
-- States are `bootstrap`, `connecting`, `syncing`, `live`, `paused`, `interrupted`, `disconnected`, `stopped`, `unsupported`, `error`. A cached frame is always overlaid non-Live. In v1, `interrupted` is classification only and resolves to terminal `disconnected` or `error`; it does not automatically reconnect Capture.
+- Viewer uses the protected auto-bootstrap/session flow and never receives a reusable bearer in query strings, ordinary/model output, error messages, persisted history, logs, process arguments or telemetry. Standalone responses keep the exact deny-by-default CSP and `frame-ancestors 'none'`; video is rendered directly from decoded frame/image ownership to Canvas.
+- States are `authorizing`, `connecting`, `syncing`, `live`, `paused`, `interrupted`, `disconnected`, `stopped`, `unsupported`, `error`. A cached frame is always overlaid non-Live; `interrupted` remains classification only and resolves terminally without automatic Capture restart.
 - H.264 uses no `VideoDecoderConfig.description`. Each epoch has exactly one config, at most 256 KiB. Viewer derives exact `avc1.PPCCLL` from same-epoch SPS, verifies support, retains that config, and concatenates config + IDR into one key `EncodedVideoChunk` at most 8 MiB. Replacement config in one epoch, wrong epoch/order or pre-allocation combined-size overflow is rejected as `malformed-media`.
 - New epoch clears old config, decode queue and output frames, resets/reconfigures the decoder and waits for config + key. Every `VideoFrame` is explicitly closed.
 - Decoder queue is at most 4. Viewer retains at most one pending render frame. It sends cumulative `ack.sequence` only after every covered frame has left decode/render ownership and its `VideoFrame` is closed. On `gap`, it releases all ownership through `discardThroughSequence`, resets synchronization and treats ACK at or below that watermark/previous highest ACK as an idempotent no-op; an ACK above Runtime's highest sent frame closes the Viewer as `malformed-control`.
@@ -55,7 +55,7 @@ Viewer 可依赖 Runtime 和 Contracts，不依赖 Capture 内部实现或 `Appi
 ### Content-addressed build and bootstrap
 
 - `build.mjs` uses exact approved esbuild to produce one ESM document entry named `entry.js`, one ESM Worker named `worker.js` and one stylesheet named `style.css`, with no splitting, dynamic remote import, inline source, eval, CDN or runtime-generated code. Content address is the Runtime URL hash segment, not the basename; bytes/hash/MIME/role feed the confirmed manifest. A repeated clean build is byte-identical; generated source maps and unlisted files fail the build.
-- Entry derives StreamId only from exact `/viewer/<canonical-uuid>` pathname. It uses same-origin `credentials:"same-origin"`, exact JSON content type/bodies and no referrer to call pairing start, renders the returned eight-character code/expiry, and retries redeem every 500 ms only while 409 and before expiry. 401/404/expiry becomes `error`; network failure is bounded to three one-second retries only before owner approval, then explicit user retry creates a new pairing. Bootstrap grant exists in one local variable, is immediately consumed by session POST, then cleared; it never enters DOM, URL, storage, console or error text.
+- Entry derives StreamId only from exact `/viewer/<canonical-uuid>` pathname, then uses same-origin credentials、exact JSON `{streamId}` and no referrer to call session creation. A 204 precedes Worker start；401/409 map to fixed authorization/conflict UI。Entry never handles a pairing code、pairingId、grant or readable cookie。
 - After session 204, entry starts the Worker from the manifest's exact content-addressed worker URL and supplies only `origin` plus StreamId. Worker derives WebSocket URL exactly as `ws://<same 127.0.0.1 authority>/v1/stream`; arbitrary wsUrl, alternate authority/path/query/fragment are impossible. Cookie is browser-managed and never read by JavaScript. All fetch non-2xx responses map through fixed safe UI errors; app does not infer stream existence.
 
 ### Main/Worker protocol and ownership
@@ -79,7 +79,7 @@ Viewer 可依赖 Runtime 和 Contracts，不依赖 Capture 内部实现或 `Appi
 
 - Worker retains at most one transferred-not-painted frame. Main retains at most one render frame and draws it on the next requestAnimationFrame directly to Canvas. Canvas backing width/height equal frame display size; CSS preserves aspect ratio and uses `min(device-pixel-size, available viewport)` so it may downscale but never upscale/crop/stretch. Background is black and DPR changes do not alter source aspect.
 - Main closes every VideoFrame in `finally` after draw or discard and emits one frame-complete. Each generation starts with `freshEligible=true`; the next decoded key output is `fresh:true`, while deltas are always false. A current-generation `fresh:true,presented:true` completion consumes eligibility and atomically enters Live. A `presented:false` completion releases ownership but does not consume eligibility, so the next same-generation decoded key is fresh again; this repeats until one fresh key is presented or generation resets. Worker releases ownership and may advance cumulative ACK for both outcomes. Main rejects/completes late generation or sequence at/below reset floor. GAP reset, terminal or visibility false synchronously removes Live. Canvas remains cached under mandatory non-Live overlay outside Live.
-- DOM is fixed: pairing code/expiry, one status element, one Canvas and one accessible retry button; no frame image or secret-bearing element. Exact states are `bootstrap→connecting→syncing→live`, `live↔paused`, and terminal `disconnected|stopped|unsupported|error`; `interrupted` immediately displays non-Live and then resolves terminal. Worker state messages drive all non-Live states; reset drives syncing; only Main paint drives live. Error text is fixed safe code/message only. Retry performs a full new pairing/session/Worker lifecycle.
+- DOM is fixed: one status element, one Canvas and one accessible retry button; no pairing element、frame image or secret-bearing element。Exact states are `authorizing→connecting→syncing→live`, `live↔paused`, and terminal `disconnected|stopped|unsupported|error`; `interrupted` displays non-Live then resolves terminally。Retry starts a new HTML/session/Worker lifecycle but never calls control ensure。
 
 ### Visibility, refresh and metrics
 
@@ -116,3 +116,22 @@ Viewer 可依赖 Runtime 和 Contracts，不依赖 Capture 内部实现或 `Appi
 - 探测中visibility只更新desired flag；tiny synthetic probe可在hidden完成但不进入Live，成功的hidden连接不产生visible demand。pagehide/dispose则fence。转移失败由sender关闭未转移bitmap；成功转移后Main为唯一关闭者，含旧Worker/generation、非法消息、pagehide/dispose和draw error。迟到decode由Worker关闭且不再转移；超时/unsupported释放全部已知probe资源并dispose Worker，不保留图片/object URL/source socket。
 - 每次minor1 draw或discard完成且图像关闭后，立即发送一条合并ACK；成功当前可见generation的paint推进release/paint，discard只推进release。不能先release再补paint、等待四帧或tick；GAP不制造paint或冗余ACK。旧epoch/旧可见周期完成不能令当前表面Live；minor0的精确ACK、四帧累计和tail flush保持原样。
 - preflight的5000ms仅为基础能力资源期限，不保证所有真实内容均可解码，也不替代First Live计时。首个有效authenticated visible renewal才启动权威五秒fresh-paint deadline；原2秒stale、12秒终止、grace及ImageBitmap全路径清理要求不变。
+
+## Agent Auto-Bootstrap Viewer
+
+本节定义 `AGENT-AUTO-VIEWER-BOOTSTRAP-MACOS-ANDROID-11B` 的 Viewer clean cut。Worker、H.264/MJPEG、Canvas、paint/ACK、visibility、freshness和metrics管线no-delta。
+
+### Entry authorization and session
+
+- 页面状态改为 `authorizing→connecting→syncing→live`、`live↔paused`、`interrupted`及既有terminal states。所有non-Live状态以遮罩覆盖cached frame；hidden/pagehide立即Paused/grace，返回先Syncing且必须fresh paint才Live。
+- DOM clean-cut删除pairing code/expiry、owner approval提示和redeem polling；固定表面只保留status、Canvas和accessible retry。不得显示、读写或持久化claim/media cookie或任何secret。
+- eligible HTML由Runtime提交HttpOnly claim cookie。Entry随后以same-origin credentials和exact body`{streamId}` POST `/v1/sessions`；204成功后才启动existing Worker并进入Connecting。Entry不发送Authorization、pairingId、code或grant，JavaScript不能读取cookie。
+- session 401显示固定“authorization expired”并要求Agent再次展示Viewer；409显示固定“Viewer already open elsewhere”。browser retry只重试当前HTML/session规则，不调用control ensure、不延长permit、不自动抢占Viewer。
+- committed response loss、reload、provisional media cookie和stale claim清理由Runtime cookie contract拥有；Entry对204保持幂等，不从响应、URL或DOM推断credential/state。
+
+### Navigation, cleanup and unchanged media boundary
+
+- native direct open与explicit user-activated link均由Runtime exact Fetch Metadata gate决定；iframe、prefetch/prerender或无activation非native导航不可启动Entry/Worker/demand。
+- pagehide先同步撤销可见性、停止refresh/renewal、fence旧generation并关闭所有VideoFrame/ImageBitmap和Worker；它不发送HTTP DELETE，WebSocket关闭由Runtime权威进入5秒grace，避免旧document迟到cleanup携带新cookie撤销下一导航。显式retry、error与非pagehide dispose仍按Runtime state-appropriate cookie规则DELETE；401 cleanup不复活旧Worker。
+- Worker start/protocol、content-addressed assets/CSP、WebSocket、H.264/MJPEG decode、Canvas ownership、First Live、2秒stale/12秒终止、5秒grace、quality/rotation和无frame进入模型/日志规则全部保持。
+- 验收必须证明无pairing DOM/code/poll/grant、session 204先于Worker、401/409 fixed UI、Authorizing/Connecting/Syncing/Live/Paused/Interrupted transitions，以及两个media profile全量回归；真实画面只由本机用户查看。

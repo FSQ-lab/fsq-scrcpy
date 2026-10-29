@@ -33,21 +33,14 @@ async function prepared() {
   try {
     const ensured = await service.ensureStandaloneViewer({deviceRef,idempotencyKey:KEY}); assert.ok(ensured.ok);
     const streamId = ensured.value.snapshot.streamId, origin = service.origin!;
-    const browser = (extra: Record<string,string> = {}) => ({Origin:origin,"Sec-Fetch-Site":"same-origin",...extra});
+    const browser = (extra: Record<string,string> = {}) => ({Origin:origin,"Sec-Fetch-Site":"same-origin","Sec-Fetch-Mode":"cors","Sec-Fetch-Dest":"empty",...extra});
     const page = await call(origin,"GET",`/viewer/${streamId}`,undefined,{"Sec-Fetch-Site":"none","Sec-Fetch-Mode":"navigate","Sec-Fetch-Dest":"document"});
     assert.equal(page.status,200); assert.equal(page.headers["cache-control"],"no-store");
     assert.match(page.body,/<html data-media-profile="mjpeg">/); assert.equal(page.body.match(/data-media-profile=/g)?.length,1);
     assert.match(String(page.headers["content-security-policy"]),/frame-ancestors 'none'/);
     assert.equal(external.requests.length,0);
-    const start = await call(origin,"POST","/v1/pairings",{streamId},browser()); assert.equal(start.status,201);
-    const pairing: unknown = JSON.parse(start.body);
-    assert.ok(pairing && typeof pairing === "object" && "pairingId" in pairing && typeof pairing.pairingId === "string" && "pairingCode" in pairing && typeof pairing.pairingCode === "string");
-    const approval = await service.approvePairing({streamId,pairingId:pairing.pairingId,pairingCode:pairing.pairingCode,viewerGrant:ensured.value.access.viewerGrant}); assert.ok(approval.ok);
-    const redeem = await call(origin,"POST",`/v1/pairings/${pairing.pairingId}/redeem`,{pairingCode:pairing.pairingCode},browser({Cookie:cookie(start.headers)})); assert.equal(redeem.status,200);
-    const redeemed: unknown = JSON.parse(redeem.body);
-    assert.ok(redeemed && typeof redeemed === "object" && "bootstrapGrant" in redeemed && typeof redeemed.bootstrapGrant === "string");
-    const bootstrap = redeemed.bootstrapGrant;
-    const issued = await call(origin,"POST","/v1/sessions",{},browser({Authorization:`FSQ-Bootstrap ${bootstrap}`})); assert.equal(issued.status,204);
+    const claimCookie=cookie(page.headers);
+    const issued = await call(origin,"POST","/v1/sessions",{streamId},browser({Cookie:claimCookie})); assert.equal(issued.status,204);
     let mediaCookie = cookie(issued.headers);
     const connect = async () => {
       const ws = new Client(origin.replace("http:","ws:")+"/v1/stream","fsq-viewer.v1",{origin,headers:{Cookie:mediaCookie},perMessageDeflate:false});
@@ -204,8 +197,8 @@ test("DELETE and session TTL synchronously fence old paint, epoch and invalid vi
       if(loss!=="delayed-ttl"){
         await waitFor(()=>f.snapshot().phase==="grace");await ack(ws,old);
         source.write(part(jpeg(8,16,6)));
-        await waitFor(()=>connected.messages.some(message=>{const h=decodeMediaHeader(message);return h.kind===1&&h.epoch===2n;}));
-        assert.equal(f.snapshot().phase,"grace");assert.equal(f.snapshot().activeViewerCount,0);
+        await new Promise<void>(resolve=>setImmediate(resolve));
+        assert.equal(connected.messages.some(message=>{const h=decodeMediaHeader(message);return h.kind===1&&h.epoch===2n;}),false);assert.equal(f.snapshot().phase,"grace");assert.equal(f.snapshot().activeViewerCount,0);
       }
       const closed=new Promise<void>(resolve=>ws!.once("close",()=>resolve()));
       ws.send(JSON.stringify({v:1,type:"lease-renew",visible:true,creditFrames:4,creditBytes:8_388_608}));

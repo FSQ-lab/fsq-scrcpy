@@ -13,7 +13,6 @@ import {
   validateControlVersion,
   validateDeviceRef,
   validateControlResult,
-  validateApproveViewerValue,
   validateEnsureViewerValue,
   validateHelloControlValue,
   validateInspectControlValue,
@@ -22,7 +21,6 @@ import {
   validateRuntimeTarget,
   validateWaitControlRequest,
   validateWaitControlWireRequest,
-  type ApproveViewerValue,
   type ControlError,
   type ControlErrorCode,
   type ControlResult,
@@ -43,7 +41,6 @@ import type { AndroidRuntimeSlot, RuntimeGenerationState } from "./control-state
 import { MutationCancelled } from "./state.js";import type { RuntimeService } from "./index.js";
 
 export interface RuntimeOwnerControl extends AsyncDisposable {
-  approveViewerPairing(input: Readonly<{ streamId: string; pairingCode: string }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>>;
   shutdownRuntime(input: RuntimeTarget, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>>;
   close(): Promise<void>;
 }
@@ -53,8 +50,7 @@ export interface RuntimeControlHostOptions {
   readonly service?: RuntimeService;readonly slot: AndroidRuntimeSlot;readonly generation: RuntimeGenerationState;readonly onShutdown: () => Promise<void>;readonly timer?:ControlTimer;
 }
 const ROUTES = Object.freeze({
-  "/v1/control/hello": "client", "/v1/viewer/ensure": "client", "/v1/stream/inspect": "client", "/v1/stream/wait": "client", "/v1/stream/stop": "client",
-  "/v1/viewer/approve": "owner", "/v1/runtime/shutdown": "owner",
+  "/v1/control/hello": "client", "/v1/viewer/ensure": "client", "/v1/stream/inspect": "client", "/v1/stream/wait": "client", "/v1/stream/stop": "client", "/v1/runtime/shutdown": "owner",
 } as const);
 type Route = keyof typeof ROUTES;
 export const CONTROL_DEADLINES=Object.freeze({connect:1_000,request:5_000,readIdle:2_000,terminate:2_000,readiness:10_000}as const);
@@ -67,37 +63,35 @@ const ordinary = (value: unknown): value is Record<string, unknown> => typeof va
 const exact = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => ordinary(value) && Reflect.ownKeys(value).length === keys.length && keys.every((key) => { const d = Object.getOwnPropertyDescriptor(value, key); return !!d?.enumerable && "value" in d; });
 const frozen = <T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const fail = (code: ControlErrorCode): Readonly<{ ok: false; error: ControlError }> => frozen({ ok: false, error: controlError(code) });
-const ok = <T extends EnsureViewerValue | InspectControlValue | StopStreamValue | ApproveViewerValue | ShutdownRuntimeValue | HelloControlValue>(value: T): Readonly<{ ok: true; value: T }> => frozen({ ok: true, value });
+const ok = <T extends EnsureViewerValue | InspectControlValue | StopStreamValue | ShutdownRuntimeValue | HelloControlValue>(value: T): Readonly<{ ok: true; value: T }> => frozen({ ok: true, value });
 const safeTarget = (value: unknown): RuntimeTarget | undefined => { try { return validateRuntimeTarget(value); } catch { return; } };
 const deviceEqual = (left: ReturnType<typeof validateDeviceRef>, right: ReturnType<typeof validateDeviceRef>): boolean => left.contractVersion === right.contractVersion && left.platform === right.platform && left.namespace === right.namespace && left.opaqueId === right.opaqueId;
 const targetEqual = (a: RuntimeTarget, b: RuntimeTarget): boolean => a.instanceId === b.instanceId && a.generation === b.generation;
 const derive = (credential: string, context: "client" | "owner"): Buffer => { const root = Buffer.from(credential, "base64url"); try { return createHmac("sha256", root).update(`FSQ-Control/v1/${context}`).digest(); } finally { root.fill(0); } };
 export function deriveControlBearer(credential: string, context: "client" | "owner"): string { const bytes = derive(credential, context); try { return bytes.toString("base64url"); } finally { bytes.fill(0); } }
-const MUTATING_ROUTES:ReadonlySet<Route>=new Set(["/v1/viewer/ensure","/v1/stream/stop","/v1/viewer/approve","/v1/runtime/shutdown"]);
-function captureError(code: string): ControlErrorCode { return (["malformed-control", "runtime-overload", "unauthorized"] as string[]).includes(code) ? code as ControlErrorCode : "runtime-exited"; }
+const MUTATING_ROUTES:ReadonlySet<Route>=new Set(["/v1/viewer/ensure","/v1/stream/stop","/v1/runtime/shutdown"]);
+function captureError(code: string): ControlErrorCode { return (["malformed-control", "runtime-overload"] as string[]).includes(code) ? code as ControlErrorCode : "runtime-exited"; }
 function cancelled(signal: AbortSignal | undefined): Readonly<{ ok: false; error: ControlError }> | undefined { return signal?.aborted ? fail("request-cancelled") : undefined; }
 const signalOptions=(signal?:AbortSignal):Readonly<{signal?:AbortSignal}>|undefined=>signal?{signal}:undefined;
 const waitReady = (ready: Promise<void>, milliseconds: number,timer:ControlTimer): Promise<void> => new Promise((resolve) => { const deadline=armControlDeadline(timer,milliseconds,resolve); ready.then(() => { deadline.clear(); resolve(); }); });
-const ROUTE_ERRORS:Readonly<Record<Route,ReadonlySet<ControlErrorCode>>>=Object.freeze({"/v1/control/hello":new Set<ControlErrorCode>(["control-version-mismatch","instance-conflict","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/ensure":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/stream/inspect":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/wait":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/stop":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/approve":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","unauthorized","deadline-exceeded"]),"/v1/runtime/shutdown":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"])});
+const ROUTE_ERRORS:Readonly<Record<Route,ReadonlySet<ControlErrorCode>>>=Object.freeze({"/v1/control/hello":new Set<ControlErrorCode>(["control-version-mismatch","instance-conflict","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/viewer/ensure":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/inspect":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/wait":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/stream/stop":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"]),"/v1/runtime/shutdown":new Set<ControlErrorCode>(["instance-conflict","control-version-mismatch","malformed-control","runtime-exited","runtime-overload","deadline-exceeded"])});
 function helloFeatureMismatch(value:unknown):boolean{
   if(!ordinary(value)||value.ok!==true||!ordinary(value.value)||!ordinary(value.value.instance))return false;
-  const features=value.value.instance.features;
-  if(!Array.isArray(features)||Object.getPrototypeOf(features)!==Array.prototype||features.length!==0||Reflect.ownKeys(features).length!==1)return false;
-  try{validateControlResult({...value,value:{...value.value,instance:{...value.value.instance,features:["wait-v1"]}}});return true;}catch{return false;}
+  try{validateControlResult({...value,value:{...value.value,instance:{...value.value.instance,features:["wait-v1","auto-bootstrap-v1"]}}});return true;}catch{return false;}
 }
 function responseHeader(response:IncomingMessage,name:string):string{const values:string[]=[];for(let index=0;index<response.rawHeaders.length;index+=2)if(response.rawHeaders[index]!.toLowerCase()===name)values.push(response.rawHeaders[index+1]??"");if(values.length!==1)throw new TypeError("Invalid control response");return values[0]!;}
-function decodeRouteResponse(route:Route,response:IncomingMessage,bytes:Uint8Array):ReturnType<typeof validateControlResult>{const contentType=responseHeader(response,"content-type"),length=responseHeader(response,"content-length"),cache=responseHeader(response,"cache-control"),nosniff=responseHeader(response,"x-content-type-options");if(contentType!=="application/json; charset=utf-8"||!/^(?:0|[1-9][0-9]*)$/.test(length)||Number(length)!==bytes.byteLength||cache!=="no-store"||nosniff!=="nosniff")throw new TypeError("Invalid control response");const parsed=parseCanonicalControlJson(bytes);let result:ReturnType<typeof validateControlResult>;try{result=validateControlResult(parsed);}catch{if(route==="/v1/control/hello"&&response.statusCode===200&&helloFeatureMismatch(parsed))return fail("control-version-mismatch");throw new TypeError("Invalid control response");}if(result.ok){if(response.statusCode!==200)throw new TypeError("Invalid control response");if(route==="/v1/control/hello")validateHelloControlValue(result.value);else if(route==="/v1/viewer/ensure")validateEnsureViewerValue(result.value);else if(route==="/v1/stream/inspect"||route==="/v1/stream/wait")validateInspectControlValue(result.value);else if(route==="/v1/stream/stop")validateStopStreamValue(result.value);else if(route==="/v1/viewer/approve")validateApproveViewerValue(result.value);else validateShutdownRuntimeValue(result.value);return result;}if(result.error.code==="revision-conflict"){if(route!=="/v1/stream/stop"||response.statusCode!==409||!("snapshot"in result))throw new TypeError("Invalid control response");return result;}if(!ROUTE_ERRORS[route].has(result.error.code)||response.statusCode!==controlErrorStatus(result.error)||"snapshot"in result)throw new TypeError("Invalid control response");return result;}
+function decodeRouteResponse(route:Route,response:IncomingMessage,bytes:Uint8Array):ReturnType<typeof validateControlResult>{const contentType=responseHeader(response,"content-type"),length=responseHeader(response,"content-length"),cache=responseHeader(response,"cache-control"),nosniff=responseHeader(response,"x-content-type-options");if(contentType!=="application/json; charset=utf-8"||!/^(?:0|[1-9][0-9]*)$/.test(length)||Number(length)!==bytes.byteLength||cache!=="no-store"||nosniff!=="nosniff")throw new TypeError("Invalid control response");const parsed=parseCanonicalControlJson(bytes);let result:ReturnType<typeof validateControlResult>;try{result=validateControlResult(parsed);}catch{if(route==="/v1/control/hello"&&response.statusCode===200&&helloFeatureMismatch(parsed))return fail("control-version-mismatch");throw new TypeError("Invalid control response");}if(result.ok){if(response.statusCode!==200)throw new TypeError("Invalid control response");if(route==="/v1/control/hello")validateHelloControlValue(result.value);else if(route==="/v1/viewer/ensure")validateEnsureViewerValue(result.value);else if(route==="/v1/stream/inspect"||route==="/v1/stream/wait")validateInspectControlValue(result.value);else if(route==="/v1/stream/stop")validateStopStreamValue(result.value);else validateShutdownRuntimeValue(result.value);return result;}if(result.error.code==="revision-conflict"){if(route!=="/v1/stream/stop"||response.statusCode!==409||!("snapshot"in result))throw new TypeError("Invalid control response");return result;}if(!ROUTE_ERRORS[route].has(result.error.code)||response.statusCode!==controlErrorStatus(result.error)||"snapshot"in result)throw new TypeError("Invalid control response");return result;}
 
 export class RuntimeControlProvider {
   readonly instance: RuntimeInstance;
   #service: RuntimeService; #shutdown: () => Promise<void>; #shuttingDown = false; #ready = false;
   constructor(service: RuntimeService, slot: AndroidRuntimeSlot, generation: RuntimeGenerationState, shutdown: () => Promise<void>) {
     this.#service = service; this.#shutdown = shutdown;
-    this.instance = frozen({ controlVersion: CONTROL_VERSION, instanceId: generation.instanceId, generation: generation.generation, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1"] as const) });
+    this.instance = frozen({ controlVersion: CONTROL_VERSION, instanceId: generation.instanceId, generation: generation.generation, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
   }
   markReady(): void { this.#ready = true; }
   hello(expected: RuntimeTarget | null): ControlResult<HelloControlValue> { if (!this.#ready || this.#shuttingDown) return fail("runtime-exited"); if (expected && !targetEqual(expected, this.instance)) return fail("instance-conflict"); return ok(frozen({ instance: this.instance })); }
-  async ensureViewer(options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<EnsureViewerValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (!this.#ready || this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.ensureControlViewer(this.instance.deviceRef,options?.signal); if (!result.ok) return fail(captureError(result.error.code)); return ok(frozen({ deviceRef: result.value.snapshot.deviceRef, descriptor: result.value.access.descriptor, snapshot: result.value.snapshot })); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
+  async ensureViewer(options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<EnsureViewerValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (!this.#ready || this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.ensureControlViewer(this.instance.deviceRef,options?.signal); if (!result.ok) return fail(captureError(result.error.code)); return ok(frozen({ deviceRef: result.value.snapshot.deviceRef, descriptor: result.value.descriptor, snapshot: result.value.snapshot })); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
   #observation(result:ReturnType<RuntimeService["inspectControl"]>):ControlResult<InspectControlValue>{
     if(!result.ok)return fail(result.error.code==="runtime-overload"?"runtime-overload":"malformed-control");
     const source=result.value;
@@ -122,7 +116,6 @@ export class RuntimeControlProvider {
     catch(cause){if(cause instanceof MutationCancelled)return fail("request-cancelled");throw cause;}
   }
   async stopStream(input: Readonly<{ streamId: string; expectedRevision?: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<StopStreamResult> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.stopControl({ ...input, reason: "explicit-stop" },options?.signal); if (result.ok) return ok(frozen({ snapshot: result.value.snapshot })); if ("snapshot" in result) return frozen({ ok: false, error: revisionConflictError(), snapshot: result.snapshot }); return fail("malformed-control"); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
-  async approveViewerPairing(input: Readonly<{ streamId: string; pairingCode: string }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (this.#shuttingDown) return fail("runtime-exited"); try { const result = await this.#service.approveControlPairing(input.streamId, input.pairingCode,options?.signal); if (!result.ok) return fail(result.error.code === "unauthorized" ? "unauthorized" : "malformed-control"); return ok(frozen({ snapshot: result.value.snapshot, approvedAt: result.value.approvedAt })); } catch(cause) { if(cause instanceof MutationCancelled)return fail("request-cancelled"); throw cause; } }
   async shutdownRuntime(input: RuntimeTarget, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>> { const aborted = cancelled(options?.signal); if (aborted) return aborted; if (!targetEqual(input, this.instance)) return fail("instance-conflict"); if (!this.#shuttingDown) { if(options?.signal?.aborted)return fail("request-cancelled");this.#shuttingDown = true; await this.#service.close(); } return ok(frozen({ instanceId: this.instance.instanceId, generation: this.instance.generation })); }
   completeShutdown():Promise<void>{return this.#shutdown();}
 }
@@ -170,7 +163,7 @@ export class RuntimeControlHost {
     const onTimeout=async():Promise<void>=>{if(expired)return;expired=true;idle?.clear();total?.clear();try{await this.#writeFinished(response,408,Buffer.from('{"error":"request-timeout"}'),true);}finally{request.destroy();resolveTimeout(frozen({ok:false,status:408,error:"request-timeout",close:true,written:true}));}};const timed=new Promise<BodyResult>((resolve)=>{resolveTimeout=resolve;idle=armControlDeadline(this.#timer,CONTROL_DEADLINES.readIdle,()=>{void onTimeout();});total=armControlDeadline(this.#timer,CONTROL_DEADLINES.request,()=>{void onTimeout();});});
     const read=(async():Promise<BodyResult>=>{const chunks:Buffer[]=[];let count=0;try{for await(const chunk of request){if(expired)continue;idle?.clear();idle=armControlDeadline(this.#timer,CONTROL_DEADLINES.readIdle,()=>{void onTimeout();});const bytes=Buffer.from(chunk as Uint8Array);count+=bytes.length;if(count>expected)throw new TypeError("length");chunks.push(bytes);}if(expired)return frozen({ok:false,status:408,error:"request-timeout",close:true,written:true});if(count!==expected)throw new TypeError("length");return frozen({ok:true,value:parseCanonicalControlJson(Buffer.concat(chunks),16_384)});}catch{return frozen({ok:false,status:expired?408:400,error:expired?"request-timeout":"request-rejected",close:true,...(expired?{written:true}:{})});}})();const result=await Promise.race([read,timed]);idle?.clear();total?.clear();if(!result.ok&&result.written)await read;return result;
   }
-  async #dispatch(route: Route, body: unknown,signal?:AbortSignal): Promise<ControlResult<HelloControlValue | EnsureViewerValue | InspectControlValue | StopStreamValue | ApproveViewerValue | ShutdownRuntimeValue> | StopStreamResult> {
+  async #dispatch(route: Route, body: unknown,signal?:AbortSignal): Promise<ControlResult<HelloControlValue | EnsureViewerValue | InspectControlValue | StopStreamValue | ShutdownRuntimeValue> | StopStreamResult> {
     if (!ordinary(body)) return fail("malformed-control");
     try { validateControlVersion(body.controlVersion); } catch { return fail("control-version-mismatch"); }
     if (route === "/v1/control/hello" && !this.#ready) await waitReady(this.#readyPromise, 4_500,this.#timer);
@@ -205,7 +198,6 @@ export class RuntimeControlHost {
       }
     }
     if (route === "/v1/stream/stop") { if (!exact(body, ["controlVersion", "target", "streamId", "expectedRevision"]) || !UUID.test(String(body.streamId)) || (body.expectedRevision !== null && (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 1))) return fail("malformed-control"); return provider.stopStream({ streamId: body.streamId as string, ...(body.expectedRevision === null ? {} : { expectedRevision: body.expectedRevision as number }) },signalOptions(signal)); }
-    if (route === "/v1/viewer/approve") { if (!exact(body, ["controlVersion", "target", "streamId", "pairingCode"]) || !UUID.test(String(body.streamId))) return fail("malformed-control"); const pairingCode = body.pairingCode; if (typeof pairingCode !== "string" || !/^[0-9A-HJKMNP-TV-Z]{8}$/.test(pairingCode)) return fail("malformed-control"); return provider.approveViewerPairing({ streamId: String(body.streamId), pairingCode },signalOptions(signal)); }
     return exact(body, ["controlVersion", "target"]) ? provider.shutdownRuntime(target,signalOptions(signal)) : fail("malformed-control");
   }
   #application(response: ServerResponse, result: Readonly<{ ok: false; error: ControlError }>): void { this.#write(response, controlErrorStatus(result.error), encodeCanonicalControlJson(result)); }
@@ -280,7 +272,6 @@ export async function attachControlSession(port: number, attachment: RuntimeAtta
 export class OwnerHttpControl implements RuntimeOwnerControl {
   readonly #client: HttpRuntimeControl;
   constructor(port: number, target: RuntimeTarget, credential: string,timer:ControlTimer=SYSTEM_CONTROL_TIMER) { this.#client = new HttpRuntimeControl(port, target, deriveControlBearer(credential, "owner"),timer); }
-  approveViewerPairing(input: Readonly<{ streamId: string; pairingCode: string }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>> { return this.#client.call("/v1/viewer/approve", { controlVersion: CONTROL_VERSION, target: this.#client.target, streamId: input.streamId, pairingCode: input.pairingCode }, options, true) as Promise<ControlResult<ApproveViewerValue>>; }
   shutdownRuntime(input: RuntimeTarget, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>> { return this.#client.call("/v1/runtime/shutdown", { controlVersion: CONTROL_VERSION, target: input }, options, true) as Promise<ControlResult<ShutdownRuntimeValue>>; }
   close(): Promise<void> { return this.#client.close(); }
   [Symbol.asyncDispose](): Promise<void> { return this.close(); }

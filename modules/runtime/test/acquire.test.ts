@@ -106,7 +106,7 @@ async function raceState(): Promise<Readonly<{ parent: string; state: LocalRunti
   return Object.freeze({ parent, state, slot, close: () => rm(parent, { recursive: true, force: true }) });
 }
 function instance(slot: AndroidRuntimeSlot, target: Readonly<{ instanceId: string; generation: string }>): RuntimeInstance {
-  return Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1"] as const) });
+  return Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
 }
 
 await test("start-or-attach adopts reset authority, respawns, and old cleanup cannot delete the new generation", async () => {

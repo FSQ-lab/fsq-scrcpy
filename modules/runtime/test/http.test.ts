@@ -1,13 +1,173 @@
 import { createHash as nodeHash } from "node:crypto";
-import assert from "node:assert/strict"; import test from "node:test"; import { ensured,hangingBody,request,cookieToken,pairingCookieToken } from "./support/runtime-fixtures.js";
-import { createViewerAssetManifest,HTTP_SERVER_OPTIONS } from "../src/http.js";
-const decoded = (bytes: Uint8Array): unknown => JSON.parse(new TextDecoder().decode(bytes));
-async function issuedSession(){const f=await ensured(),p=await f.auth.startPairing(f.snapshot.streamId);assert.ok(p.ok);if(!p.ok)throw new Error("pairing");assert.ok((await f.auth.approvePairing({streamId:f.snapshot.streamId,pairingId:p.value.pairingId,pairingCode:p.value.pairingCode,viewerGrant:f.access.viewerGrant})).ok);const redeemed=await f.auth.redeem(p.value.pairingId,p.value.pairingCode,p.value.browserToken);assert.ok(redeemed.ok);if(!redeemed.ok)throw new Error("redeem");const session=await f.auth.createSession(redeemed.value.bootstrapGrant);assert.ok(session.ok);if(!session.ok)throw new Error("session");return{f,token:session.value};}
-test("viewer executes only entry module and serves privately copied immutable assets", async () => { const f=await ensured(), viewer=await f.http.handle({ method:"GET",target:`/viewer/${f.snapshot.streamId}`,rawHeaders:[["Host",f.http.authority],["Sec-Fetch-Site","none"],["Sec-Fetch-Mode","navigate"],["Sec-Fetch-Dest","document"]] }), html=new TextDecoder().decode(viewer.body); assert.equal(viewer.status,200); assert.match(viewer.headers["Content-Security-Policy"]!,/frame-ancestors 'none'/); assert.ok(html.includes(`<script type="module" src="/assets/${f.sha256}/app.js"></script>`)); assert.equal(html.includes(f.workerSha),false); f.asset[0]=0; const asset=await f.http.handle({ method:"GET",target:`/assets/${f.sha256}/app.js`,rawHeaders:[["Host",f.http.authority]] }); assert.equal(new TextDecoder().decode(asset.body),"export default 1"); assert.equal(asset.headers.ETag,f.sha256); assert.equal((await f.http.handle({ method:"GET",target:`/assets/${f.sha256}/%61pp.js`,rawHeaders:[["Host",f.http.authority]] })).status,404); });
-test("asset manifest enforces roles, MIME, exact data descriptors and fixed limits", () => { const bytes=new TextEncoder().encode("x"), sha=(value:Uint8Array)=>createHash(value); assert.throws(()=>createViewerAssetManifest([{ role:"entry-module",name:"app.js",sha256:sha(bytes),mime:"text/javascript; charset=utf-8",bytes }])); assert.throws(()=>createViewerAssetManifest([{ role:"entry-module",name:"app.js",sha256:sha(bytes),mime:"text/css; charset=utf-8",bytes },{ role:"worker-module",name:"worker.js",sha256:sha(bytes),mime:"text/javascript; charset=utf-8",bytes }])); let reads=0; const evil=Object.defineProperty({ role:"entry-module",name:"app.js",sha256:sha(bytes),mime:"text/javascript; charset=utf-8",bytes },"name",{ enumerable:true,get(){ reads++; return "app.js"; } }); assert.throws(()=>createViewerAssetManifest([evil as never,{ role:"worker-module",name:"worker.js",sha256:sha(bytes),mime:"text/javascript; charset=utf-8",bytes }])); assert.equal(reads,0); assert.deepEqual(HTTP_SERVER_OPTIONS,{ host:"127.0.0.1",port:0,maxHeaderSize:8192,maxHeadersCount:32,headersTimeout:5000,requestTimeout:5000,bodyIdleTimeout:2000,bodyTotalTimeout:5000 }); });
-function createHash(bytes: Uint8Array): string { return nodeHash("sha256").update(bytes).digest("hex"); }
-test("authority, Origin, duplicates, proxy headers and caps fail closed", async () => { const f=await ensured(); for (const req of [request("POST","/v1/pairings",JSON.stringify({streamId:f.snapshot.streamId}),[["Host","localhost:43210"]]),request("POST","/v1/pairings",JSON.stringify({streamId:f.snapshot.streamId}),[["Origin","http://evil.invalid"]]),request("POST","/v1/pairings",JSON.stringify({streamId:f.snapshot.streamId}),[["Forwarded","for=127.0.0.1"]]),{ ...request("POST","/v1/pairings","{}"),target:"http://127.0.0.1:43210/v1/pairings" }]) assert.equal((await f.http.handle(req)).status,400); assert.equal((await f.http.handle({ method:"OPTIONS",target:"/v1/pairings",rawHeaders:[["Host",f.http.authority]] })).status,405); });
-test("body framing, duplicate JSON, size and slowloris are bounded", async () => { const f=await ensured(), path="/v1/pairings"; assert.equal((await f.http.handle({ ...request("POST",path,"{}"),rawHeaders:[["Host",f.http.authority],["Origin",f.http.origin],["Sec-Fetch-Site","same-origin"],["Content-Type","application/json"],["Content-Length","2"]] })).status,415); assert.equal((await f.http.handle(request("POST",path,'{"streamId":"x","streamId":"y"}'))).status,400); assert.equal((await f.http.handle({ ...request("POST",path,"{}"),rawHeaders:[...request("POST",path,"{}").rawHeaders.filter(([n])=>n!=="Content-Length"),["Content-Length","4097"]] })).status,413); let destroyed=false; const slow=f.http.handle({ ...request("POST",path),rawHeaders:[["Host",f.http.authority],["Origin",f.http.origin],["Sec-Fetch-Site","same-origin"],["Content-Type","application/json; charset=utf-8"],["Content-Length","2"]],body:hangingBody(),destroy:()=>{ destroyed=true; } }); await Promise.resolve(); f.clock.tick(2_000); assert.equal((await slow).status,400); assert.equal(destroyed,true); });
-test("pairing browser cookie prevents cross-client redemption and clears on success", async () => { const f=await ensured(), start=await f.http.handle(request("POST","/v1/pairings",JSON.stringify({streamId:f.snapshot.streamId}))); assert.equal(start.status,201); const pairing=decoded(start.body) as {pairingId:string;pairingCode:string}, browser=pairingCookieToken(start.headers["Set-Cookie"]!); assert.equal(JSON.stringify(decoded(start.body)).includes(browser),false); const early=await f.http.handle(request("POST",`/v1/pairings/${pairing.pairingId}/redeem`,JSON.stringify({pairingCode:pairing.pairingCode}),[["Cookie",`fsq_pairing_v1=${browser}`]])); assert.equal(early.status,409); assert.ok((await f.auth.approvePairing({ streamId:f.snapshot.streamId,pairingId:pairing.pairingId,pairingCode:pairing.pairingCode,viewerGrant:f.access.viewerGrant })).ok); assert.equal((await f.http.handle(request("POST",`/v1/pairings/${pairing.pairingId}/redeem`,JSON.stringify({pairingCode:pairing.pairingCode}),[["Cookie","fsq_pairing_v1=AAAAAAAAAAAAAAAAAAAAAA"]]))).status,401); const redeemed=await f.http.handle(request("POST",`/v1/pairings/${pairing.pairingId}/redeem`,JSON.stringify({pairingCode:pairing.pairingCode}),[["Cookie",`fsq_pairing_v1=${browser}`]])); assert.equal(redeemed.status,200); assert.match(redeemed.headers["Set-Cookie"]!,/fsq_pairing_v1=;.*Max-Age=0$/); const grant=(decoded(redeemed.body) as {bootstrapGrant:string}).bootstrapGrant, session=await f.http.handle(request("POST","/v1/sessions","{}",[["Authorization",`FSQ-Bootstrap ${grant}`]])); assert.equal(session.status,204); const token=cookieToken(session.headers["Set-Cookie"]!), refresh=await f.http.handle(request("POST","/v1/sessions/refresh",'{"visible":true}',[["Cookie",`fsq_media_v1=${token}`]])); assert.equal(refresh.status,204); assert.notEqual(cookieToken(refresh.headers["Set-Cookie"]!),token); });
-test("upgrade prevalidation admits native Chrome fetch absence and canonical deflate only", async () => { const f=await ensured(), p=await f.auth.startPairing(f.snapshot.streamId); assert.ok(p.ok); if (!p.ok) return; assert.ok((await f.auth.approvePairing({ streamId:f.snapshot.streamId,pairingId:p.value.pairingId,pairingCode:p.value.pairingCode,viewerGrant:f.access.viewerGrant })).ok); const r=await f.auth.redeem(p.value.pairingId,p.value.pairingCode,p.value.browserToken); assert.ok(r.ok); if (!r.ok) return; const s=await f.auth.createSession(r.value.bootstrapGrant); assert.ok(s.ok); if (!s.ok) return; const required=[ ["Upgrade","WebSocket"],["Connection","UPGRADE"],["Sec-WebSocket-Version","13"],["Sec-WebSocket-Key","AAAAAAAAAAAAAAAAAAAAAA=="]] as const, baseHeaders=[["Host",f.http.authority],["Origin",f.http.origin],["Cookie",`fsq_media_v1=${s.value}`],["Sec-WebSocket-Protocol","fsq-viewer.v1"],...required] as const, upgrade={ method:"GET",target:"/v1/stream",rawHeaders:[...baseHeaders,["Sec-Fetch-Site","same-origin"]] as const }; assert.equal((await f.http.validateUpgrade(upgrade)).ok,true);assert.equal((await f.http.validateUpgrade({...upgrade,rawHeaders:baseHeaders})).ok,true);for(const site of ["","cross-site","same-site","none","SAME-ORIGIN"]){assert.deepEqual(await f.http.validateUpgrade({...upgrade,rawHeaders:[...baseHeaders,["Sec-Fetch-Site",site]]}),{ok:false,status:400});}assert.equal((await f.http.validateUpgrade({...upgrade,rawHeaders:[...baseHeaders,["Sec-WebSocket-Extensions","permessage-deflate; client_max_window_bits"]]})).ok,true);assert.equal((await f.http.validateUpgrade({...upgrade,rawHeaders:[...baseHeaders,["Sec-WebSocket-Extensions","PerMessage-Deflate;\tclient_max_window_bits"]]})).ok,true); assert.equal((await f.http.validateUpgrade({ ...upgrade,body:(async function*(){ yield new Uint8Array(); })() })).ok,false); const framing:readonly(readonly[string,string])[]=[["Transfer-Encoding","chunked"],["Content-Length","1"],["Content-Type","application/json; charset=utf-8"]]; for(const addition of framing)assert.equal((await f.http.validateUpgrade({...upgrade,rawHeaders:[...upgrade.rawHeaders,addition]})).ok,false); for(let i=0;i<required.length;i++){const invalid=[...upgrade.rawHeaders.filter(([name])=>name!==required[i]![0])];assert.deepEqual(await f.http.validateUpgrade({...upgrade,rawHeaders:invalid}),{ok:false,status:400});}for(const replacement of [["Upgrade","websockets"],["Connection","keep-alive, Upgrade"],["Sec-WebSocket-Version","12"],["Sec-WebSocket-Key","AAAAAAAAAAAAAAAAAAAAAA="],["Sec-WebSocket-Key","AAAAAAAAAAAAAAAAAAAAAB=="]] as const){const raw=upgrade.rawHeaders.filter(([name])=>name!==replacement[0]);assert.deepEqual(await f.http.validateUpgrade({...upgrade,rawHeaders:[...raw,replacement]}),{ok:false,status:400});}for(const extension of ["permessage-deflate","permessage-deflate, x","permessage-deflate; client_max_window_bits=15","permessage-deflate; client_max_window_bits; client_max_window_bits","x-permessage-deflate; client_max_window_bits","permessage-deflate; server_no_context_takeover","permessage-deflate; client_max_window_bits\u000b"]){assert.deepEqual(await f.http.validateUpgrade({...upgrade,rawHeaders:[...upgrade.rawHeaders,["Sec-WebSocket-Extensions",extension]]}),{ok:false,status:400});}const noAuth=upgrade.rawHeaders.filter(([name])=>name!=="Cookie"),badBeforeAuth=await f.http.validateUpgrade({...upgrade,rawHeaders:[...noAuth.filter(([name])=>name!=="Sec-WebSocket-Version"),["Sec-WebSocket-Version","12"]]});assert.deepEqual(badBeforeAuth,{ok:false,status:400});assert.equal((await f.http.validateUpgrade(upgrade)).ok,true); });
-test("session DELETE always clears only media cookie, including expired and revoked tokens",async()=>{const clear="fsq_media_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",live=await issuedSession(),success=await live.f.http.handle(request("DELETE","/v1/sessions/current",undefined,[["Cookie",`fsq_media_v1=${live.token}`]]));assert.equal(success.status,204);assert.equal(success.headers["Set-Cookie"],clear);assert.equal(success.body.byteLength,0);const revoked=await issuedSession();await revoked.f.state.terminal.request(revoked.f.snapshot.streamId,"explicit-stop");const deniedRevoked=await revoked.f.http.handle(request("DELETE","/v1/sessions/current",undefined,[["Cookie",`fsq_media_v1=${revoked.token}`]]));assert.equal(deniedRevoked.status,401);assert.equal(deniedRevoked.headers["Set-Cookie"],clear);assert.deepEqual(decoded(deniedRevoked.body),{error:"unauthorized"});const expired=await issuedSession();expired.f.clock.advanceWithoutTimers(60_000);const deniedExpired=await expired.f.http.handle(request("DELETE","/v1/sessions/current",undefined,[["Cookie",`fsq_media_v1=${expired.token}`]]));assert.equal(deniedExpired.status,401);assert.equal(deniedExpired.headers["Set-Cookie"],clear);for(const cookie of [undefined,"fsq_media_v1=invalid","other_cookie=retained"]){const extra=cookie?[["Cookie",cookie] as [string,string]]:[];const denied=await revoked.f.http.handle(request("DELETE","/v1/sessions/current",undefined,extra));assert.equal(denied.status,401);assert.equal(denied.headers["Set-Cookie"],clear);assert.deepEqual(decoded(denied.body),{error:"unauthorized"});}const next=await revoked.f.auth.ensureStandaloneViewer({deviceRef:revoked.f.snapshot.deviceRef,idempotencyKey:"AQEBAQEBAQEBAQEBAQEBAQ"});assert.ok(next.ok);if(!next.ok)return;const pairing=await revoked.f.http.handle(request("POST","/v1/pairings",JSON.stringify({streamId:next.value.snapshot.streamId})));assert.equal(pairing.status,201);});
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createViewerAssetManifest, HTTP_SERVER_OPTIONS, takeHttpDelivery } from "../src/http.js";
+import { body, cookieToken, ensured, hangingBody, request } from "./support/runtime-fixtures.js";
+
+const hash = (bytes: Uint8Array): string => nodeHash("sha256").update(bytes).digest("hex");
+const nativeHeaders = (authority: string): readonly (readonly [string,string])[] => [["Host",authority],["Sec-Fetch-Site","none"],["Sec-Fetch-Mode","navigate"],["Sec-Fetch-Dest","document"]];
+
+async function claim() {
+  const fixture = await ensured();
+  const reply = await fixture.http.handle({ method:"GET", target:`/viewer/${fixture.snapshot.streamId}`, rawHeaders:nativeHeaders(fixture.http.authority) });
+  assert.equal(reply.status,200);
+  const delivery=takeHttpDelivery(reply);
+  assert.ok(delivery);
+  await delivery!.finish();
+  return { ...fixture, claim:cookieToken(reply.headers["Set-Cookie"]!,"fsq_auto_v1") };
+}
+
+async function issued() {
+  const fixture=await claim();
+  const reply=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}`]]));
+  assert.equal(reply.status,204);
+  const delivery=takeHttpDelivery(reply);
+  assert.ok(delivery);
+  await delivery!.finish();
+  return { ...fixture, media:cookieToken(reply.headers["Set-Cookie"]!) };
+}
+
+test("viewer claim is transactional and HTML remains secret-free",async()=>{
+  const fixture=await ensured();
+  const first=await fixture.http.handle({method:"GET",target:`/viewer/${fixture.snapshot.streamId}`,rawHeaders:nativeHeaders(fixture.http.authority)});
+  assert.equal(first.status,200);
+  const claimToken=cookieToken(first.headers["Set-Cookie"]!,"fsq_auto_v1");
+  assert.equal(new TextDecoder().decode(first.body).includes(claimToken),false);
+  assert.match(String(first.headers["Content-Security-Policy"]),/frame-ancestors 'none'/);
+  const other=await fixture.http.handle({method:"GET",target:`/viewer/${fixture.snapshot.streamId}`,rawHeaders:nativeHeaders(fixture.http.authority)});
+  assert.equal(other.status,409);
+  await takeHttpDelivery(first)!.rollback();
+  const replacement=await fixture.http.handle({method:"GET",target:`/viewer/${fixture.snapshot.streamId}`,rawHeaders:nativeHeaders(fixture.http.authority)});
+  assert.equal(replacement.status,200);
+});
+
+test("native and activated link navigation pass exact Fetch Metadata policy",async()=>{
+  const native=await ensured();
+  assert.equal((await native.http.handle({method:"GET",target:`/viewer/${native.snapshot.streamId}`,rawHeaders:nativeHeaders(native.http.authority)})).status,200);
+  for(const site of ["same-origin","same-site","cross-site"]){
+    const linked=await ensured();
+    const headers:[[string,string],[string,string],[string,string],[string,string],[string,string]]=[["Host",linked.http.authority],["Sec-Fetch-Site",site],["Sec-Fetch-User","?1"],["Sec-Fetch-Mode","navigate"],["Sec-Fetch-Dest","document"]];
+    assert.equal((await linked.http.handle({method:"GET",target:`/viewer/${linked.snapshot.streamId}`,rawHeaders:headers})).status,200);
+  }
+  for(const extra of [["Sec-Fetch-Site","cross-site"],["Sec-Fetch-Dest","iframe"],["Purpose","prefetch"],["Sec-Purpose","prerender"]] as const){
+    const denied=await ensured();
+    const headers=nativeHeaders(denied.http.authority).filter(([name])=>name.toLowerCase()!==extra[0].toLowerCase()).concat([extra]);
+    assert.notEqual((await denied.http.handle({method:"GET",target:`/viewer/${denied.snapshot.streamId}`,rawHeaders:headers})).status,200);
+  }
+});
+
+test("session POST requires exact body, claim cookie and browser headers",async()=>{
+  const fixture=await claim();
+  const valid=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}`]]));
+  assert.equal(valid.status,204);
+  assert.equal(cookieToken(valid.headers["Set-Cookie"]!).length,43);
+  for(const invalid of [
+    request("POST","/v1/sessions","{}",[["Cookie",`fsq_auto_v1=${fixture.claim}`]]),
+    request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId,extra:true}),[["Cookie",`fsq_auto_v1=${fixture.claim}`]]),
+    request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId})),
+    request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}`],["Authorization","secret"]]),
+  ]) assert.notEqual((await fixture.http.handle(invalid)).status,204);
+});
+
+test("session response rollback invalidates provisional media and retry succeeds",async()=>{
+  const fixture=await claim();
+  const first=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}`]]));
+  const media=cookieToken(first.headers["Set-Cookie"]!);
+  await takeHttpDelivery(first)!.rollback();
+  const stale=await fixture.http.validateUpgrade({method:"GET",target:"/v1/stream",rawHeaders:[["Host",fixture.http.authority],["Origin",fixture.http.origin],["Sec-Fetch-Site","same-origin"],["Cookie",`fsq_media_v1=${media}`],["Upgrade","websocket"],["Connection","upgrade"],["Sec-WebSocket-Version","13"],["Sec-WebSocket-Key","AAAAAAAAAAAAAAAAAAAAAA=="],["Sec-WebSocket-Protocol","fsq-viewer.v1"]]});
+  assert.equal(stale.ok,false);
+  const retry=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}; fsq_media_v1=${media}`]]));
+  assert.equal(retry.status,204);
+});
+
+test("committed session retry with claim and media is idempotent 204",async()=>{
+  const fixture=await issued();
+  const retry=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}; fsq_media_v1=${fixture.media}`]]));
+  assert.equal(retry.status,204);
+  assert.equal(cookieToken(retry.headers["Set-Cookie"]!),fixture.media);
+});
+
+test("duplicate, unknown and malformed cookies fail before allocation",async()=>{
+  const fixture=await claim();
+  for(const cookie of [
+    `fsq_auto_v1=${fixture.claim}; fsq_auto_v1=${fixture.claim}`,
+    `unknown=${fixture.claim}`,
+    "fsq_auto_v1=short",
+    `fsq_auto_v1=${fixture.claim};unknown=x`,
+  ]){
+    const reply=await fixture.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",cookie]]));
+    assert.equal(reply.status,400);
+  }
+});
+
+test("refresh rotates media, clears stale claim, and never renews visible demand",async()=>{
+  const fixture=await issued();
+  const reply=await fixture.http.handle(request("POST","/v1/sessions/refresh",JSON.stringify({visible:true}),[["Cookie",`fsq_auto_v1=${fixture.claim}; fsq_media_v1=${fixture.media}`]]));
+  assert.equal(reply.status,204);
+  assert.notEqual(cookieToken(reply.headers["Set-Cookie"]!),fixture.media);
+  assert.ok((reply.headers["Set-Cookie"] as string[]).some(value=>value.startsWith("fsq_auto_v1=;")));
+  assert.equal(fixture.auth.hasVisibleDemand(fixture.snapshot.streamId),false);
+});
+
+test("DELETE applies state-appropriate cookies and clears both names",async()=>{
+  const fixture=await issued();
+  const success=await fixture.http.handle(request("DELETE","/v1/sessions/current",undefined,[["Cookie",`fsq_auto_v1=${fixture.claim}; fsq_media_v1=${fixture.media}`]]));
+  assert.equal(success.status,204);
+  assert.deepEqual(success.headers["Set-Cookie"],["fsq_auto_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0","fsq_media_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0"]);
+  const stale=await fixture.http.handle(request("DELETE","/v1/sessions/current",undefined,[["Cookie",`fsq_media_v1=${fixture.media}`]]));
+  assert.equal(stale.status,401);
+});
+
+
+test("newly armed stream replaces stale claim and clears old media before session",async()=>{
+  const old=await issued();
+  assert.ok((await old.auth.stop({streamId:old.snapshot.streamId,reason:"explicit-stop"})).ok);
+  const next=await old.auth.ensureStandaloneViewer({deviceRef:old.snapshot.deviceRef,idempotencyKey:"AQEBAQEBAQEBAQEBAQEBAQ"});
+  assert.ok(next.ok);if(!next.ok)return;
+  const page=await old.http.handle({method:"GET",target:`/viewer/${next.value.snapshot.streamId}`,rawHeaders:[...nativeHeaders(old.http.authority),["Cookie",`fsq_auto_v1=${old.claim}; fsq_media_v1=${old.media}`]]});
+  assert.equal(page.status,200);
+  const cookies=page.headers["Set-Cookie"] as string[];
+  assert.equal(cookies.filter(value=>value.startsWith("fsq_auto_v1=")).length,2);
+  assert.equal(cookies[0],"fsq_auto_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+  assert.equal(cookies[1],"fsq_media_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");
+  assert.match(cookies[2]!,/^fsq_auto_v1=[A-Za-z0-9_-]{43};/);
+  const claimToken=cookieToken(cookies,"fsq_auto_v1");
+  await takeHttpDelivery(page)!.finish();
+  const session=await old.http.handle(request("POST","/v1/sessions",JSON.stringify({streamId:next.value.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${claimToken}`]]));
+  assert.equal(session.status,204);
+});
+
+test("provisional stale claim is cleared before replacement claim",async()=>{
+  const f=await ensured(),first=await f.http.handle({method:"GET",target:`/viewer/${f.snapshot.streamId}`,rawHeaders:nativeHeaders(f.http.authority)}),stale=cookieToken(first.headers["Set-Cookie"]!,"fsq_auto_v1");
+  await takeHttpDelivery(first)!.rollback();
+  const replacement=await f.http.handle({method:"GET",target:`/viewer/${f.snapshot.streamId}`,rawHeaders:[...nativeHeaders(f.http.authority),["Cookie",`fsq_auto_v1=${stale}`]]}),cookies=replacement.headers["Set-Cookie"] as string[];
+  assert.equal(cookies[0],"fsq_auto_v1=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0");assert.match(cookies[1]!,/^fsq_auto_v1=[A-Za-z0-9_-]{43};/);
+  await takeHttpDelivery(replacement)!.finish();
+});
+test("pairing and redeem routes are absent for every method",async()=>{
+  const fixture=await ensured();
+  for(const target of ["/v1/pairings","/v1/pairings/12345678-1234-4234-8234-123456789abc/redeem"]){
+    for(const method of ["GET","POST","DELETE"]) assert.equal((await fixture.http.handle({method,target,rawHeaders:[["Host",fixture.http.authority]]})).status,404);
+  }
+});
+
+test("asset manifest and immutable serving retain bounded exact behavior",async()=>{
+  const bytes=new TextEncoder().encode("x"),sha=hash(bytes);
+  assert.throws(()=>createViewerAssetManifest([{role:"entry-module",name:"app.js",sha256:sha,mime:"text/javascript; charset=utf-8",bytes}]));
+  const fixture=await ensured();
+  const asset=await fixture.http.handle({method:"GET",target:`/assets/${fixture.sha256}/app.js`,rawHeaders:[["Host",fixture.http.authority]]});
+  assert.equal(asset.status,200);
+  assert.deepEqual(asset.body,fixture.asset);
+  assert.equal(HTTP_SERVER_OPTIONS.maxHeaderSize,8192);
+});
+
+test("body framing, size and read deadlines remain bounded",async()=>{
+  const fixture=await claim();
+  const path="/v1/sessions";
+  const wrongType={...request("POST",path,"{}"),rawHeaders:[["Host",fixture.http.authority],["Origin",fixture.http.origin],["Sec-Fetch-Site","same-origin"],["Sec-Fetch-Mode","cors"],["Sec-Fetch-Dest","empty"],["Content-Type","application/json"],["Content-Length","2"]] as const};
+  assert.equal((await fixture.http.handle(wrongType)).status,415);
+  const slow={method:"POST",target:path,rawHeaders:[["Host",fixture.http.authority],["Origin",fixture.http.origin],["Sec-Fetch-Site","same-origin"],["Sec-Fetch-Mode","cors"],["Sec-Fetch-Dest","empty"],["Content-Type","application/json; charset=utf-8"],["Content-Length","2"]] as const,body:hangingBody()};
+  const pending=fixture.http.handle(slow);fixture.clock.tick(2_000);assert.equal((await pending).status,400);
+  const oversized={method:"POST",target:path,rawHeaders:[["Host",fixture.http.authority],["Origin",fixture.http.origin],["Sec-Fetch-Site","same-origin"],["Sec-Fetch-Mode","cors"],["Sec-Fetch-Dest","empty"],["Content-Type","application/json; charset=utf-8"],["Content-Length","4097"]] as const,body:body("x")};
+  assert.equal((await fixture.http.handle(oversized)).status,413);
+});

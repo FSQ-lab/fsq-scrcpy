@@ -2,13 +2,10 @@ import { randomUUID } from "node:crypto";
 import { inspect } from "node:util";
 import {
   controlError,
-  validateApproveViewerValue,
   validateControlError,
   validateDeviceRef,
   validateRuntimeTarget,
   validateShutdownRuntimeValue,
-  validateStreamId,
-  type ApproveViewerValue,
   type ControlError,
   type ControlErrorCode,
   type ControlResult,
@@ -62,7 +59,6 @@ export type RebindDeviceValue = Readonly<{
 
 export interface RuntimeOwnerLocal extends AsyncDisposable {
   inspectLocalState(input: Readonly<{ platform: "android" }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<LocalStateStatusValue>>;
-  approveViewerPairing(input: Readonly<{ deviceRef: DeviceRef; streamId: string; pairingCode: string }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>>;
   shutdownRuntime(input: Readonly<{ deviceRef: DeviceRef }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>>;
   resetControlState(input: Readonly<{ platform: "android"; expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<ResetControlStateValue>>;
   rebindDevice(input: Readonly<{ platform: "android"; expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<RebindDeviceValue>>;
@@ -119,12 +115,6 @@ function deviceInput(value: unknown): DeviceRef {
   const deviceRef = validateDeviceRef(value.deviceRef);
   if (deviceRef.platform !== "android") throw new TypeError("Invalid owner-local input");
   return deviceRef;
-}
-function approveInput(value: unknown): Readonly<{ deviceRef: DeviceRef; streamId: string; pairingCode: string }> {
-  if (!exact(value, ["deviceRef", "streamId", "pairingCode"]) || typeof value.pairingCode !== "string" || !/^[0-9A-HJKMNP-TV-Z]{8}$/.test(value.pairingCode)) throw new TypeError("Invalid owner-local input");
-  const deviceRef = validateDeviceRef(value.deviceRef), streamId = validateStreamId(value.streamId);
-  if (deviceRef.platform !== "android") throw new TypeError("Invalid owner-local input");
-  return Object.freeze({ deviceRef, streamId, pairingCode: value.pairingCode });
 }
 function maintenanceError(value: unknown): OwnerMaintenanceError {
   try { const error = validateControlError(value); return controlError(error.code); } catch { /* try local error */ }
@@ -207,18 +197,6 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
     } catch (cause) { return validateLocalStateStatusResult(failure(this.#map(cause))); }
   }
 
-  async approveViewerPairing(input: Readonly<{ deviceRef: DeviceRef; streamId: string; pairingCode: string }>, configured?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ApproveViewerValue>> {
-    try {
-      const checkedInput = approveInput(input), checked = options(configured);
-      if (this.#closed) return failure("runtime-exited");
-      if (checked?.signal?.aborted) return failure("request-cancelled");
-      const current = await this.#current(checkedInput.deviceRef, checked?.signal);
-      if (!current.ok) return current.result;
-      const control = this.#dependencies.owner(current.slot, current.target); this.#controls.add(control);
-      try { return this.#controlResult(await control.approveViewerPairing({ streamId: checkedInput.streamId, pairingCode: checkedInput.pairingCode }, checked), validateApproveViewerValue); }
-      finally { this.#controls.delete(control); await control.close(); }
-    } catch (cause) { return failure(this.#map(cause)); }
-  }
 
   async shutdownRuntime(input: Readonly<{ deviceRef: DeviceRef }>, configured?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>> {
     try {
@@ -305,7 +283,7 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
     if (authority.kind === "error") return Object.freeze({ result: failure(authority.code) });
     return Object.freeze({ slot, generation: authority.generation });
   }
-  #controlResult<T extends ApproveViewerValue | ShutdownRuntimeValue>(value: unknown, validateValue: (input: unknown) => T): ControlResult<T> {
+  #controlResult<T extends ShutdownRuntimeValue>(value: unknown, validateValue: (input: unknown) => T): ControlResult<T> {
     if (exact(value, ["ok", "value"]) && value.ok === true) return ok(deepFreezeCopy(validateValue(value.value))) as ControlResult<T>;
     if (exact(value, ["ok", "error"]) && value.ok === false) { const error = validateControlError(value.error); return failure(error.code); }
     throw new TypeError("Invalid owner control result");

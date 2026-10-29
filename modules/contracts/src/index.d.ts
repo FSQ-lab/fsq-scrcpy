@@ -83,24 +83,6 @@ export declare function validateSize(value: unknown): Size;
 export declare function validateViewerDescriptor(value: unknown): ViewerDescriptor;
 export declare function validateStreamError(value: unknown): StreamError;
 export declare function validateStreamSnapshot(value: unknown): StreamSnapshot;
-declare class Grant {
-    #private;
-    constructor(raw: string);
-    static reveal(grant: Grant): string;
-    toString(): string;
-    toJSON(): string;
-    [Symbol.toPrimitive](): string;
-}
-export type ViewerGrant = Grant;
-export interface ViewerAccess {
-    readonly descriptor: ViewerDescriptor;
-    readonly viewerGrant: ViewerGrant;
-    toJSON(): {
-        descriptor: ViewerDescriptor;
-    };
-}
-export declare function createViewerAccess(descriptorValue: unknown, rawGrant: unknown): ViewerAccess;
-export declare function revealViewerGrant(grant: ViewerGrant): string;
 export declare const MEDIA_MAJOR: 1, MEDIA_HEADER_BYTES: 40;
 export declare const MAX_PAYLOAD_BYTES: 8388608, MAX_CONFIG_BYTES: 262144, MAX_FRAME_BYTES: 8126464;
 export declare const MEDIA_KIND: Readonly<{

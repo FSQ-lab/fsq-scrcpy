@@ -6,7 +6,6 @@ export type CliCommand =
   | Readonly<{ path: "stream wait"; json: true; streamId: string; afterRevision: number; waitMs: number }>
   | Readonly<{ path: "stream watch"; jsonSeq: true; streamId: string; afterRevision?: number }>
   | Readonly<{ path: "stream stop"; json: boolean; streamId: string; expectedRevision?: number }>
-  | Readonly<{ path: "viewer approve"; json: boolean; streamId: string; code: string }>
   | Readonly<{ path: "runtime shutdown"; json: boolean; deviceRef: string }>
   | Readonly<{ path: "local-state status"; json: boolean; platform: "android" }>
   | Readonly<{ path: "local-state reset-control"; json: boolean; platform: "android"; deviceRef: string }>
@@ -14,9 +13,8 @@ export type CliCommand =
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const REVISION = /^[1-9][0-9]*$/;
-const CODE = /^[0-9A-HJKMNP-TV-Z]{8}$/;
 const PATHS = new Set([
-  "viewer ensure", "stream inspect", "stream wait", "stream watch", "stream stop", "viewer approve",
+  "viewer ensure", "stream inspect", "stream wait", "stream watch", "stream stop",
   "runtime shutdown", "local-state status", "local-state reset-control", "local-state rebind-device",
 ]);
 const OPTIONS = {
@@ -25,7 +23,6 @@ const OPTIONS = {
   "stream wait": { "stream-id": { type: "string" }, "after-revision": { type: "string" }, "wait-ms": { type: "string" }, json: { type: "boolean" }, "json-seq": { type: "boolean" } },
   "stream watch": { "stream-id": { type: "string" }, "after-revision": { type: "string" }, json: { type: "boolean" }, "json-seq": { type: "boolean" } },
   "stream stop": { "stream-id": { type: "string" }, "expected-revision": { type: "string" }, json: { type: "boolean" } },
-  "viewer approve": { "stream-id": { type: "string" }, code: { type: "string" }, json: { type: "boolean" } },
   "runtime shutdown": { "device-ref": { type: "string" }, json: { type: "boolean" } },
   "local-state status": { platform: { type: "string" }, json: { type: "boolean" } },
   "local-state reset-control": { platform: { type: "string" }, "device-ref": { type: "string" }, json: { type: "boolean" } },
@@ -85,10 +82,6 @@ export function parseCommand(argv: readonly string[]): CliCommand | undefined {
       const raw = values[option], parsedRevision = raw === undefined ? undefined : revision(raw);
       if (raw !== undefined && parsedRevision === undefined) return;
       return Object.freeze({ path, json, streamId, ...(parsedRevision === undefined ? {} : path === "stream inspect" ? { afterRevision: parsedRevision } : { expectedRevision: parsedRevision }) }) as CliCommand;
-    }
-    if (path === "viewer approve") {
-      const streamId = values["stream-id"], code = values.code;
-      return uuid(streamId) && typeof code === "string" && CODE.test(code) ? Object.freeze({ path, json, streamId, code }) : undefined;
     }
     if (path === "runtime shutdown") {
       const deviceRef = values["device-ref"];

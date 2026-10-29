@@ -29,7 +29,7 @@ const ATTACHMENT: RuntimeAttachment = Object.freeze({
     generation: GENERATION,
     contractVersion: 2,
     deviceRef: DEVICE,
-    features: Object.freeze(["wait-v1"] as const),
+    features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const),
   }),
 });
 const DESCRIPTOR = Object.freeze({
@@ -67,7 +67,6 @@ function harness(attachment: unknown = ATTACHMENT): Harness {
   } as unknown as RuntimeControlSession;
   const owner: RuntimeOwnerLocal = {
     async inspectLocalState() { value.touches.push("status"); return value.statusResult as never; },
-    async approveViewerPairing() { value.touches.push("approve"); return value.controlResult as never; },
     async shutdownRuntime() { value.touches.push("shutdown"); return value.controlResult as never; },
     async resetControlState() { value.touches.push("reset"); return value.controlResult as never; },
     async rebindDevice() { value.touches.push("rebind"); return value.controlResult as never; },
@@ -137,13 +136,15 @@ await test("revision grammar admits the safe maximum and rejects every noncanoni
   }
 });
 
-await test("pairing code accepts only the eight-character uppercase Crockford alphabet", async () => {
-  const valid = harness();
-  valid.controlResult = { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 1 } };
-  assert.equal((await run(["viewer", "approve", "--stream-id", STREAM_ID, "--code", "0AHJKNPZ"], valid)).code, 0);
-  for (const code of ["0123456", "012345678", "0123456i", "0123456I", "0123456L", "0123456O", "0123456U", "0123456-"]) {
-    const result = await run(["viewer", "approve", "--stream-id", STREAM_ID, "--code", code]);
-    assert.equal(result.code, 2, code);
+await test("removed viewer approve grammar always fails before product I/O", async () => {
+  for (const args of [
+    ["viewer", "approve", "--stream-id", STREAM_ID, "--code", "0AHJKNPZ"],
+    ["viewer", "approve", "--stream-id", STREAM_ID, "--code", "01234567", "--json"],
+    ["viewer", "approve", "--stream-id", STREAM_ID],
+  ]) {
+    const result = await run(args);
+    assert.equal(result.code, 2);
+    assert.equal((result.value.error as Record<string, unknown>).code, "invalid-cli-syntax");
     assert.deepEqual(result.harness.touches, []);
   }
 });
@@ -163,7 +164,6 @@ await test("strict operation validators reject legacy and additional fields", as
     [["stream", "inspect", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT } }],
     [["stream", "inspect", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT, changes: [], reset: false } }],
     [["stream", "stop", "--stream-id", STREAM_ID], { ok: true, value: { snapshot: SNAPSHOT, extra: true } }],
-    [["viewer", "approve", "--stream-id", STREAM_ID, "--code", "01234567"], { ok: true, value: { snapshot: SNAPSHOT, approvedAt: 1, pairingId: "private" } }],
     [["runtime", "shutdown", "--device-ref", DEVICE_ID], { ok: true, value: { instanceId: INSTANCE_ID, generation: GENERATION, port: 49152 } }],
   ];
   for (const [args, resultValue] of malformed) {
@@ -176,8 +176,8 @@ await test("strict operation validators reject legacy and additional fields", as
     assert.equal(result.stdout.includes("49152"), false);
   }
 });
-await test("viewer ensure rejects legacy and extra Runtime feature tuples", async () => {
-  for (const features of [[], ["wait-v1", "extra"]]) {
+await test("viewer ensure accepts only the new Runtime feature tuple", async () => {
+  for (const features of [[], ["wait-v1"], ["auto-bootstrap-v1", "wait-v1"], ["wait-v1", "auto-bootstrap-v1", "auto-bootstrap-v1"], ["wait-v1", "auto-bootstrap-v1", "extra"]]) {
     const attachment = { ...ATTACHMENT, instance: { ...ATTACHMENT.instance, features } };
     const result = await run(["viewer", "ensure", "--platform", "android"], harness(attachment));
     assert.equal(result.code, 5);

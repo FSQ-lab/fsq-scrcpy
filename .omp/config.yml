@@ -1,3 +1,16 @@
+modelRoles:
+  fsq_research: github-copilot/gpt-6.1-sol
+  fsq_worker: github-copilot/gpt-6.1-sol
+  fsq_architecture: github-copilot/gpt-5.6-sol-1m:medium
+  fsq_review: github-copilot/gpt-5.6-sol-1m:medium
+
 task:
   maxConcurrency: 3
   maxRecursionDepth: 1
+  agentModelOverrides:
+    product-lead: "@fsq_research"
+    architect: "@fsq_architecture"
+    scrcpy-expert: "@fsq_research"
+    streaming-engineer: "@fsq_worker"
+    agent-integration-engineer: "@fsq_worker"
+    quality-engineer: "@fsq_review"

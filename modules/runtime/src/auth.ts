@@ -1,88 +1,427 @@
 import { channel as diagnosticsChannel } from "node:diagnostics_channel";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Clock, Entropy } from "./clock.js"; import type { ApproveRequest, ApproveResult, EnsureResult, InspectResult, StopResult, UpgradeDescriptor } from "./types.js"; import { freeze } from "./types.js"; import { error, MutationCancelled, StateStore } from "./state.js";
-const CODE = "0123456789ABCDEFGHJKMNPQRSTVWXYZ", AUTH_DIAGNOSTICS=diagnosticsChannel("fsq.runtime.session.auth.v1");
-type SlotState = "pairing-pending" | "approved" | "bootstrap" | "session-issued" | "connected" | "grace";
-interface Slot { state: SlotState; streamId: string; pairingId: string; codeDigest: Buffer; browserDigest: Buffer; pairingDeadline: number; attempts: number; bootstrapDigest: Buffer | undefined; sessionDigest: Buffer | undefined; sessionId: string | undefined; sessionDeadline: number | undefined; generation: number; pairingTimer: object | undefined; sessionTimer: object | undefined; graceTimer: object | undefined; graceDeadline?: number }
-export type AuthResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; kind: "unauthorized" | "conflict" | "limit" | "not-found" }>;
-class BrowserToken { #raw: string; constructor(raw:string) { this.#raw=raw; Object.freeze(this); } static reveal(value:BrowserToken):string { return value.#raw; } toString():string { return "[REDACTED]"; } toJSON():string { return "[REDACTED]"; } [Symbol.toPrimitive]():string { return "[REDACTED]"; } }
-Object.defineProperty(BrowserToken.prototype,Symbol.for("nodejs.util.inspect.custom"),{ value:()=>"[REDACTED]" });
-export interface PairingStart { readonly pairingId: string; readonly pairingCode: string; readonly expiresAt: number; readonly browserToken: unknown }
-const ok = <T>(value: T): AuthResult<T> => freeze({ ok: true, value }); const no = <T>(kind: "unauthorized" | "conflict" | "limit" | "not-found"): AuthResult<T> => freeze({ ok: false, kind });
-type AuthOperation="create"|"refresh"|"delete"|"rollback"|"session-timer"|"revoke";type AuthOutcome="accepted"|"slot-missing"|"state-invalid"|"deadline-expired"|"token-mismatch"|"fired"|"cleared";
-const authEvent=(operation:AuthOperation,outcome:AuthOutcome,s?:Slot):void=>{if(!AUTH_DIAGNOSTICS.hasSubscribers)return;AUTH_DIAGNOSTICS.publish(freeze({operation,outcome,...(s?{state:s.state,generation:s.generation}:{})}));};
-const uuid = (e: Entropy): string => { const b = e.bytes(16).slice(); b[6] = (b[6]! & 15) | 64; b[8] = (b[8]! & 63) | 128; const h = Buffer.from(b).toString("hex"); b.fill(0); return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`; };
-export class RuntimeLifecycle {
-  #slot: Slot | undefined; #key: Buffer; #orphanTimer: object | undefined; #orphanStream: string | undefined;
-  constructor(readonly state: StateStore, readonly clock: Clock, readonly entropy: Entropy, readonly demandLost: (streamId: string) => void = () => {}) { this.#key = Buffer.from(entropy.bytes(32)); this.state.terminal.register(10, "auth", ({ streamId }) => this.revoke(streamId)); }
-  ensureStandaloneViewer(value: unknown): Promise<EnsureResult> { return this.state.ensureStandaloneViewer(value); }
+import type { ViewerDescriptor } from "../../contracts/src/index.js";
+import type { Clock, Entropy } from "./clock.js";
+import type { EnsureResult, InspectResult, StopResult, UpgradeDescriptor } from "./types.js";
+import { freeze } from "./types.js";
+import { MutationCancelled, StateStore } from "./state.js";
+
+const AUTH_DIAGNOSTICS = diagnosticsChannel("fsq.runtime.session.auth.v1");
+type SlotState = "vacant" | "armed" | "claim-delivering" | "claimed" | "session-delivering" | "session-issued" | "connected" | "grace";
+class ViewerToken {
+  #raw: string;
+  constructor(raw:string){this.#raw=raw;Object.freeze(this);}
+  static reveal(value:ViewerToken):string{return value.#raw;}
+  toString():string{return "[REDACTED]";}
+  toJSON():string{return "[REDACTED]";}
+  [Symbol.toPrimitive]():string{return "[REDACTED]";}
+}
+Object.defineProperty(ViewerToken.prototype,Symbol.for("nodejs.util.inspect.custom"),{value:()=>"[REDACTED]"});
+export type ViewerTokenHandle = ViewerToken;
+export function revealViewerToken(value:ViewerTokenHandle):string{return ViewerToken.reveal(value);}
+export interface NavigationDecision { readonly claimToken?: ViewerTokenHandle; readonly clearClaim: boolean; readonly clearMedia: boolean; readonly finish?: () => Promise<void>; readonly rollback?: () => Promise<void> }
+type FailureKind = "unauthorized" | "conflict" | "limit" | "not-found";
+export type AuthResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; kind: FailureKind }>;
+export interface SessionDecision { readonly mediaToken: ViewerTokenHandle; readonly finish: () => Promise<void>; readonly rollback: () => Promise<void> }
+
+interface Slot {
+  state: SlotState;
+  streamId: string;
+  permitDeadline: number;
+  claimDigest?: Buffer | undefined;
+  sessionDigest?: Buffer | undefined;
+  sessionId?: string | undefined;
+  sessionDeadline?: number | undefined;
+  priorSessionDigest?: Buffer | undefined;
+  priorSessionDeadline?: number | undefined;
+  priorSessionGeneration?: number | undefined;
+  sessionGeneration: number;
+  generation: number;
+  delivery: number;
+  permitTimer?: object | undefined;
+  sessionTimer?: object | undefined;
+  graceTimer?: object | undefined;
+  graceDeadline?: number | undefined;
+}
+
+const ok = <T>(value: T): AuthResult<T> => freeze({ ok: true, value });
+const no = <T>(kind: FailureKind): AuthResult<T> => freeze({ ok: false, kind });
+const uuid = (entropy: Entropy): string => {
+  const bytes = entropy.bytes(16).slice();
+  bytes[6] = (bytes[6]! & 15) | 64;
+  bytes[8] = (bytes[8]! & 63) | 128;
+  const hex = Buffer.from(bytes).toString("hex");
+  bytes.fill(0);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+};
+
+export class ViewerAuthorization {
+  #slot: Slot | undefined;
+  #key: Buffer;
+  #nextDelivery = 0;
+
+  constructor(readonly state: StateStore, readonly clock: Clock, readonly entropy: Entropy, readonly demandLost: (streamId: string) => void = () => {}) {
+    this.#key = Buffer.from(entropy.bytes(32));
+    this.state.terminal.register(10, "auth", ({ streamId }) => this.revoke(streamId));
+  }
+
+  async ensureStandaloneViewer(value: unknown, signal?: AbortSignal): Promise<EnsureResult> {
+    for(;;){
+      let wait:Promise<unknown>|undefined;
+      const result=await this.state.mutex.run<EnsureResult>(() => {
+        if (signal?.aborted) throw new MutationCancelled();
+        const ensured = this.state.ensureLocked(value);
+        if (!ensured.ok) return ensured;
+        if (!this.state.hasActive(ensured.value.snapshot.streamId)) { wait=this.state.terminal.flight(ensured.value.snapshot.streamId); return ensured; }
+        const descriptor = this.armEnsuredStreamLocked(ensured.value.snapshot.streamId);
+        return freeze({ ok: true, value: freeze({ descriptor, snapshot: ensured.value.snapshot }) });
+      });
+      if(wait){await wait;continue;}return result;
+    }
+  }
+  armEnsuredStreamLocked(streamId: string): ViewerDescriptor {
+    this.#expire();
+    let slot = this.#slot;
+    if (slot && slot.streamId !== streamId) {
+      this.#release(slot);
+      slot = undefined;
+    }
+    if (!slot) {
+      slot = { state: "vacant", streamId, permitDeadline: 0, generation: 0, sessionGeneration: 0, delivery: 0 };
+      this.#slot = slot;
+    }
+    if (slot.state === "vacant") {
+      slot.state = "armed";
+      slot.permitDeadline = this.clock.mono() + 30_000;
+      slot.generation++;
+      this.#armPermit(slot);
+      this.#event("arm", "accepted", slot);
+      return this.state.descriptor(streamId, this.clock.wall() + 30_000);
+    }
+    return this.state.descriptor(streamId);
+  }
+
   inspect(value: unknown): InspectResult { return this.state.inspect(value); }
   stop(value: unknown): Promise<StopResult> { return this.state.stop(value); }
-  async startPairing(streamId: string): Promise<AuthResult<PairingStart>> { return this.state.mutex.run(() => { this.expirePairing(); if (!this.state.hasActive(streamId)) return no("not-found"); if (this.#slot) return no("limit"); const raw=this.entropy.bytes(5); let bits=0n,code=""; for (const byte of raw) bits=(bits<<8n)|BigInt(byte); raw.fill(0); for (let i=0;i<8;i++) code+=CODE[Number((bits>>BigInt(35-i*5))&31n)]!; const pairingId=uuid(this.entropy), browserRaw=this.token(), browserToken=new BrowserToken(browserRaw), deadline=this.clock.mono()+60_000, expiresAt=this.clock.wall()+60_000, context=`${streamId}:${pairingId}:${deadline}`, slot:Slot={ state:"pairing-pending",streamId,pairingId,codeDigest:this.digest(code,`code:${context}`),browserDigest:this.digest(browserRaw,`browser:${context}`),pairingDeadline:deadline,attempts:0,bootstrapDigest:undefined,sessionDigest:undefined,sessionId:undefined,sessionDeadline:undefined,generation:0,pairingTimer:undefined,sessionTimer:undefined,graceTimer:undefined }; this.#slot=slot; this.armPairing(slot); const start=Object.defineProperties({ pairingId,pairingCode:code,expiresAt },{ browserToken:{ value:browserToken,enumerable:false,writable:false,configurable:false } }) as PairingStart; return ok(Object.freeze(start)); }); }
-  async approvePairing(value: unknown, signal?: AbortSignal): Promise<ApproveResult> { return this.state.mutex.run(() => { if (signal?.aborted) throw new MutationCancelled(); this.expirePairing(); if (!this.approveShape(value)) return freeze({ ok: false, error: error("malformed-control") }); const s = this.#slot; if (!s || s.state !== "pairing-pending" || s.streamId !== value.streamId || s.pairingId !== value.pairingId || !this.state.verifyGrant(s.streamId, value.viewerGrant)) return freeze({ ok: false, error: error("unauthorized") }); const context = `${s.streamId}:${s.pairingId}:${s.pairingDeadline}`; if (!this.compare(s.codeDigest, this.digest(value.pairingCode, `code:${context}`))) { if (++s.attempts >= 5) this.release(s); return freeze({ ok: false, error: error("unauthorized") }); } s.state = "approved"; return freeze({ ok: true, value: freeze({ snapshot: this.state.transitionLocked(s.streamId, "demand-pending", 0), approvedAt: this.clock.wall() }) }); }); }
-  approveCurrentPairing(streamId: string, pairingCode: string, viewerGrant: ApproveRequest["viewerGrant"], signal?: AbortSignal): Promise<ApproveResult> {
-    const pairingId = this.#slot?.pairingId ?? "00000000-0000-4000-8000-000000000000";
-    return this.approvePairing({ streamId, pairingId, pairingCode, viewerGrant }, signal);
-  }
-  async redeem(pairingId: string, pairingCode: string, browserToken: unknown): Promise<AuthResult<Readonly<{ bootstrapGrant: string; expiresAt: number }>>> { return this.state.mutex.run(() => { this.expirePairing(); const s=this.#slot; if (!s || s.pairingId!==pairingId || s.state==="bootstrap") return no("unauthorized"); const context=`${s.streamId}:${s.pairingId}:${s.pairingDeadline}`; let browserRaw:string; try { browserRaw=BrowserToken.reveal(browserToken as BrowserToken); } catch { return no("unauthorized"); } if (!this.compare(s.browserDigest,this.digest(browserRaw,`browser:${context}`))) return no("unauthorized"); if (s.state!=="approved") return s.state==="pairing-pending" ? no("conflict") : no("unauthorized"); if (!this.compare(s.codeDigest,this.digest(pairingCode,`code:${context}`))) { if (++s.attempts>=5) this.release(s); return no("unauthorized"); } const grant=this.token(),deadline=this.clock.mono()+60_000,expiresAt=this.clock.wall()+60_000; s.pairingDeadline=deadline; s.bootstrapDigest=this.digest(grant,`bootstrap:${s.streamId}:${deadline}`); s.state="bootstrap"; this.armPairing(s); return ok(freeze({bootstrapGrant:grant,expiresAt})); }); }
-  async createSession(grant: string): Promise<AuthResult<string>> { return this.state.mutex.run(() => { this.expirePairing(); const s = this.#slot; if (!s){authEvent("create","slot-missing");return no("unauthorized");}if(s.state!=="bootstrap"||!s.bootstrapDigest){authEvent("create","state-invalid",s);return no("unauthorized");}if(!this.compare(s.bootstrapDigest,this.digest(grant,`bootstrap:${s.streamId}:${s.pairingDeadline}`))){authEvent("create","token-mismatch",s);return no("unauthorized");}s.bootstrapDigest = undefined; if (s.pairingTimer) this.clock.clear(s.pairingTimer); s.pairingTimer = undefined; const token = this.rotate(s); s.state = "session-issued"; this.state.transitionLocked(s.streamId, "demand-pending", 0);authEvent("create","accepted",s); return ok(token); }); }
-  async refresh(token: string): Promise<AuthResult<string>> { return this.state.mutex.run(() => { const s=this.#slot,outcome=this.sessionOutcome(s,token,["session-issued","connected","grace"]);if(outcome!=="accepted"){authEvent("refresh",outcome,s);return no("unauthorized");}const rotated=this.rotate(s!);authEvent("refresh","accepted",s);return ok(rotated); }); }
-  async deleteSession(token: string): Promise<AuthResult<undefined>> { return this.state.mutex.run(() => { const s=this.#slot,outcome=this.sessionOutcome(s,token,["session-issued","connected","grace"]);if(outcome!=="accepted"){authEvent("delete",outcome,s);return no("unauthorized");}authEvent("delete","accepted",s);const deadline=s!.graceDeadline;this.revoke(s!.streamId); if (this.state.hasActive(s!.streamId)) { this.state.transitionLocked(s!.streamId, "grace", 0); this.armOrphanGrace(s!.streamId,deadline); } return ok(undefined); }); }
-  async rollbackSessionDelivery(token: string): Promise<AuthResult<undefined>> { return this.state.mutex.run(() => { const s=this.#slot,outcome=this.sessionOutcome(s,token,["session-issued"]);if(outcome!=="accepted"){authEvent("rollback",outcome,s);return no("unauthorized");}authEvent("rollback","accepted",s);this.revoke(s!.streamId); return ok(undefined); }); }
-  async validateUpgrade(token: string): Promise<AuthResult<UpgradeDescriptor>> { return this.state.mutex.run(() => { const s=this.#slot; if (!s || !this.state.hasActive(s.streamId) || !this.sessionMatches(s,token) || !s.sessionId || s.sessionDeadline===undefined) return no("unauthorized"); if (s.state==="connected") return no("limit"); if (!["session-issued","grace"].includes(s.state)) return no("unauthorized"); return ok(freeze({streamId:s.streamId,sessionId:s.sessionId,generation:s.generation,deadline:s.sessionDeadline})); }); }
-  async validateConnection(descriptor: UpgradeDescriptor): Promise<AuthResult<undefined>> { return this.state.mutex.run(() => this.checkConnection(descriptor)); }
-  async connect(descriptor: UpgradeDescriptor): Promise<AuthResult<undefined>> { return this.state.mutex.run(() => { const checked=this.checkConnection(descriptor);if(!checked.ok)return checked;const s=this.#slot!;s.state="connected";if(s.graceDeadline===undefined)this.state.transitionLocked(s.streamId,"syncing",1);return ok(undefined); }); }
-  private checkConnection(descriptor: UpgradeDescriptor): AuthResult<undefined> {
-    const s=this.#slot;
-    if (!s || !s.sessionId || s.sessionDeadline===undefined || descriptor.streamId!==s.streamId || descriptor.sessionId!==s.sessionId || descriptor.generation!==s.generation || descriptor.deadline!==s.sessionDeadline || this.clock.mono()>=s.sessionDeadline || !this.state.hasActive(s.streamId) || !["session-issued","grace"].includes(s.state) || this.graceExpired(s)) return no(s?.state==="connected" ? "limit" : "unauthorized");
-    return ok(undefined);
-  }
-  async resumeVisible(sessionId: string, activate: () => boolean = () => true): Promise<AuthResult<undefined>> {
+
+  async navigate(streamId: string, claimToken?: string, mediaToken?: string): Promise<AuthResult<NavigationDecision>> {
     return this.state.mutex.run(() => {
-      const s=this.#slot;
-      if (!s || !["connected","grace"].includes(s.state) || s.sessionId!==sessionId || !s.sessionDigest || s.sessionDeadline===undefined || !this.state.hasActive(s.streamId)) return no("unauthorized");
-      if (this.clock.mono()>=s.sessionDeadline) { s.sessionDigest=undefined; this.beginGrace(s); return no("unauthorized"); }
-      if (this.graceExpired(s)) return no("unauthorized");
-      if (!activate()) return ok(undefined);
-      const returning=s.graceDeadline!==undefined;
-      if (s.graceTimer) this.clock.clear(s.graceTimer);
-      s.graceTimer=undefined; delete s.graceDeadline; s.state="connected";
-      if(returning)this.state.transitionLocked(s.streamId,"syncing",1);
+      this.#expire();
+      const slot = this.#slot;
+      if (!this.state.hasActive(streamId)) return no("not-found");
+      if (!slot || slot.streamId !== streamId) return no("conflict");
+      if (mediaToken && this.#mediaMatches(slot, mediaToken, ["session-issued", "connected", "grace"])) return ok(freeze({ clearClaim: !!claimToken, clearMedia: false }));
+      if (claimToken && this.#claimMatches(slot, claimToken) && ["claimed", "session-delivering", "session-issued"].includes(slot.state)) return ok(freeze({ clearClaim: false, clearMedia: false }));
+      if (slot.state !== "armed") return no("conflict");
+      const token = this.#token();
+      const delivery = ++this.#nextDelivery;
+      slot.claimDigest = this.#digest(token, this.#claimContext(slot));
+      slot.delivery = delivery;
+      slot.state = "claim-delivering";
+      return ok(freeze({
+        claimToken: new ViewerToken(token),
+        clearClaim: !!claimToken,
+        clearMedia: !!mediaToken,
+        finish: () => this.#finishClaim(slot, delivery),
+        rollback: () => this.#rollbackClaim(slot, delivery),
+      }));
+    });
+  }
+
+  async createSession(streamId: string, claimToken: string, mediaToken?: string): Promise<AuthResult<SessionDecision>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || slot.streamId !== streamId || !this.state.hasActive(streamId)) return no("unauthorized");
+      if (slot.state === "session-issued") {
+        if (mediaToken && this.#mediaMatches(slot, mediaToken, ["session-issued"]) && this.#claimMatches(slot,claimToken,true)) return ok(freeze({ mediaToken:new ViewerToken(mediaToken), finish: async () => {}, rollback: async () => {} }));
+        if (!this.#claimMatches(slot,claimToken)) return no("unauthorized");
+        slot.priorSessionDigest=slot.sessionDigest && Buffer.from(slot.sessionDigest);slot.priorSessionDeadline=slot.sessionDeadline;slot.priorSessionGeneration=slot.sessionGeneration;
+      } else {
+        if (!this.#claimMatches(slot, claimToken)) return no("unauthorized");
+        if (slot.state === "session-delivering") return no("conflict");
+        if (slot.state !== "claimed") return no("conflict");
+      }
+      const token = this.#rotateSession(slot);
+      const delivery = ++this.#nextDelivery;
+      slot.delivery = delivery;
+      slot.state = "session-delivering";
+      return ok(freeze({
+        mediaToken: new ViewerToken(token),
+        finish: () => this.#finishSession(slot, delivery),
+        rollback: () => this.#rollbackSession(slot, delivery),
+      }));
+    });
+  }
+
+  async refresh(token: string): Promise<AuthResult<ViewerTokenHandle>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || !this.#mediaMatches(slot, token, ["session-issued", "connected", "grace"])) return no("unauthorized");
+      const rotated = this.#rotateSession(slot);
+      this.#armSession(slot);
+      this.#event("refresh", "accepted", slot);
+      return ok(new ViewerToken(rotated));
+    });
+  }
+
+  async deleteSession(claimToken?: string, mediaToken?: string): Promise<AuthResult<undefined>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot) return no("unauthorized");
+      const preconnect = !!claimToken && this.#claimMatches(slot, claimToken) && ["claimed", "session-delivering", "session-issued"].includes(slot.state);
+      const postconnect = !!mediaToken && this.#mediaMatches(slot, mediaToken, ["connected", "grace"]);
+      if (!preconnect && !postconnect) return no("unauthorized");
+      if (preconnect) this.#vacate(slot);
+      else {
+        slot.sessionDigest=undefined;
+        if(slot.sessionTimer)this.clock.clear(slot.sessionTimer);
+        slot.sessionTimer=undefined;
+        this.#beginGrace(slot);
+      }
       return ok(undefined);
     });
   }
+
+  async validateUpgrade(token: string): Promise<AuthResult<UpgradeDescriptor>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || !this.state.hasActive(slot.streamId) || !this.#mediaMatches(slot, token, ["session-issued", "grace"]) || !slot.sessionId || slot.sessionDeadline === undefined) return no(slot?.state === "connected" ? "limit" : "unauthorized");
+      return ok(freeze({ streamId: slot.streamId, sessionId: slot.sessionId, generation: slot.sessionGeneration, deadline: slot.sessionDeadline }));
+    });
+  }
+
+  async validateConnection(descriptor: UpgradeDescriptor): Promise<AuthResult<undefined>> {
+    return this.state.mutex.run(() => this.#checkConnection(descriptor));
+  }
+
+  async connect(descriptor: UpgradeDescriptor): Promise<AuthResult<undefined>> {
+    return this.state.mutex.run(() => {
+      const checked = this.#checkConnection(descriptor);
+      if (!checked.ok) return checked;
+      const slot = this.#slot!;
+      slot.claimDigest = undefined;
+      slot.state = "connected";
+      if (slot.graceDeadline === undefined) this.state.transitionLocked(slot.streamId, "syncing", 1);
+      return ok(undefined);
+    });
+  }
+
+  async resumeVisible(sessionId: string, activate: () => boolean = () => true): Promise<AuthResult<undefined>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || !["connected", "grace"].includes(slot.state) || slot.sessionId !== sessionId || !slot.sessionDigest || !this.state.hasActive(slot.streamId) || this.#graceExpired(slot)) return no("unauthorized");
+      if (!activate()) return ok(undefined);
+      const returning = slot.graceDeadline !== undefined;
+      if (slot.graceTimer) this.clock.clear(slot.graceTimer);
+      slot.graceTimer = undefined;
+      delete slot.graceDeadline;
+      slot.state = "connected";
+      if (returning) this.state.transitionLocked(slot.streamId, "syncing", 1);
+      return ok(undefined);
+    });
+  }
+
   hasVisibleDemand(streamId: string): boolean {
-    const s=this.#slot;
-    return !!s && s.streamId===streamId && s.state==="connected" && !!s.sessionDigest && s.sessionDeadline!==undefined && this.clock.mono()<s.sessionDeadline && s.graceDeadline===undefined;
+    const slot = this.#slot;
+    if (slot?.streamId===streamId && slot.sessionDeadline!==undefined && this.clock.mono()>=slot.sessionDeadline) { void this.state.mutex.run(()=>this.#expire()); return false; }
+    return !!slot && slot.streamId === streamId && slot.state === "connected" && !!slot.sessionDigest && slot.sessionDeadline !== undefined && slot.graceDeadline === undefined;
   }
-  async disconnect(): Promise<void> { await this.state.mutex.run(() => { const s=this.#slot; if (s?.state === "connected") this.beginGrace(s); }); }
-  revoke(streamId: string): void { this.demandLost(streamId); const s=this.#slot; if (s?.streamId === streamId) { for (const timer of [s.pairingTimer,s.sessionTimer,s.graceTimer]) if (timer) this.clock.clear(timer); if(s.sessionTimer)authEvent("session-timer","cleared",s);authEvent("revoke","cleared",s);s.bootstrapDigest=undefined; s.sessionDigest=undefined; this.#slot=undefined; } if (this.#orphanStream === streamId) { if (this.#orphanTimer) this.clock.clear(this.#orphanTimer); this.#orphanTimer=undefined; this.#orphanStream=undefined; } }
-  private rotate(s: Slot): string { const token = this.token(); s.sessionId ??= uuid(this.entropy); s.sessionDeadline = this.clock.mono() + 60_000; s.sessionDigest = this.digest(token, `session:${s.streamId}:${s.sessionId}:${s.sessionDeadline}`); this.armSession(s); return token; }
-  private sessionMatches(s: Slot, token: string): boolean { return this.sessionOutcome(s,token,["session-issued","connected","grace"])==="accepted"; }
-  private sessionOutcome(s:Slot|undefined,token:string,states:readonly SlotState[]):Exclude<AuthOutcome,"fired"|"cleared">{if(!s)return"slot-missing";if(!states.includes(s.state)||!s.sessionDigest||!s.sessionId||s.sessionDeadline===undefined)return"state-invalid";if(this.clock.mono()>=s.sessionDeadline)return"deadline-expired";return this.compare(s.sessionDigest,this.digest(token,`session:${s.streamId}:${s.sessionId}:${s.sessionDeadline}`))?"accepted":"token-mismatch";}
-  private armPairing(s: Slot): void { if (s.pairingTimer) this.clock.clear(s.pairingTimer); const deadline = s.pairingDeadline; s.pairingTimer = this.clock.set(Math.max(0, deadline - this.clock.mono()), () => { void this.state.mutex.run(() => { if (this.#slot === s && s.pairingDeadline === deadline && this.clock.mono() >= deadline && ["pairing-pending","approved","bootstrap"].includes(s.state)) this.release(s); }); }); }
-  private armSession(s: Slot): void { if (s.sessionTimer){this.clock.clear(s.sessionTimer);authEvent("session-timer","cleared",s);} const generation = ++s.generation, deadline = s.sessionDeadline!; s.sessionTimer = this.clock.set(Math.max(0, deadline - this.clock.mono()), () => { void this.state.mutex.run(() => { if (this.#slot !== s || s.generation !== generation || s.sessionDeadline !== deadline || this.clock.mono() < deadline) return;authEvent("session-timer","fired",s); s.sessionDigest = undefined; s.sessionTimer = undefined; if (s.state === "connected" || s.state === "grace") this.beginGrace(s); else if (s.state === "session-issued") this.release(s); }); }); }
-  private beginGrace(s: Slot): void {
-    this.demandLost(s.streamId);
-    if (s.state !== "grace") { s.state = "grace"; if (this.state.hasActive(s.streamId)) this.state.transitionLocked(s.streamId, "grace", 0); }
-    // Transport reconnect, hello and cookie refresh are not visible demand.
-    s.graceDeadline ??= this.clock.mono()+5_000;
-    if (!s.graceTimer) this.armSlotGrace(s);
+
+  async disconnect(): Promise<void> {
+    await this.state.mutex.run(() => { this.#expire(); const slot = this.#slot; if (slot?.state === "connected") this.#beginGrace(slot); });
   }
-  private armSlotGrace(s: Slot): void { const deadline=s.graceDeadline!,timer=this.clock.set(Math.max(0,deadline-this.clock.mono()),()=>{if(s.graceTimer!==timer||this.#slot!==s||s.graceDeadline!==deadline)return;s.graceTimer=undefined;if(!this.graceExpired(s))this.armSlotGrace(s);});s.graceTimer=timer; }
-  private graceExpired(s: Slot): boolean {
-    if(s.graceDeadline===undefined || this.clock.mono()<s.graceDeadline)return false;
-    this.demandLost(s.streamId);
-    void this.state.terminal.request(s.streamId,"lease-expired");
+
+  revoke(streamId: string): void {
+    this.demandLost(streamId);
+    const slot = this.#slot;
+    if (slot?.streamId === streamId) this.#release(slot);
+  }
+
+  async #finishClaim(slot: Slot, delivery: number): Promise<void> {
+    await this.state.mutex.run(() => {
+      if (this.#slot !== slot || slot.delivery !== delivery || slot.state !== "claim-delivering") return;
+      if (this.clock.mono() >= slot.permitDeadline || !this.state.hasActive(slot.streamId)) return this.#vacate(slot);
+      slot.state = "claimed";
+    });
+  }
+
+  async #rollbackClaim(slot: Slot, delivery: number): Promise<void> {
+    await this.state.mutex.run(() => {
+      if (this.#slot !== slot || slot.delivery !== delivery || slot.state !== "claim-delivering") return;
+      slot.claimDigest = undefined;
+      slot.state = this.clock.mono() < slot.permitDeadline && this.state.hasActive(slot.streamId) ? "armed" : "vacant";
+    });
+  }
+
+  async #finishSession(slot: Slot, delivery: number): Promise<void> {
+    await this.state.mutex.run(() => {
+      if (this.#slot !== slot || slot.delivery !== delivery || slot.state !== "session-delivering") return;
+      if (this.clock.mono() >= slot.permitDeadline || !this.state.hasActive(slot.streamId)) return this.#vacate(slot);
+      slot.priorSessionDigest=undefined;
+      slot.priorSessionDeadline=undefined;
+      slot.priorSessionGeneration=undefined;
+      slot.state = "session-issued";
+      this.#armSession(slot);
+    });
+  }
+
+  async #rollbackSession(slot: Slot, delivery: number): Promise<void> {
+    await this.state.mutex.run(() => {
+      if (this.#slot !== slot || slot.delivery !== delivery || slot.state !== "session-delivering") return;
+      if (this.clock.mono() >= slot.permitDeadline || !this.state.hasActive(slot.streamId)) return this.#vacate(slot);
+      if (slot.priorSessionDigest && slot.priorSessionDeadline !== undefined && slot.priorSessionGeneration !== undefined) {
+        slot.sessionDigest=slot.priorSessionDigest;
+        slot.sessionDeadline=slot.priorSessionDeadline;
+        slot.sessionGeneration=slot.priorSessionGeneration;
+        slot.priorSessionDigest=undefined;
+        slot.priorSessionDeadline=undefined;
+        slot.priorSessionGeneration=undefined;
+        slot.state="session-issued";
+        this.#armSession(slot);
+      } else {
+        slot.sessionDigest=undefined;
+        slot.sessionId=undefined;
+        slot.sessionDeadline=undefined;
+        slot.state="claimed";
+      }
+    });
+  }
+
+  #checkConnection(descriptor: UpgradeDescriptor): AuthResult<undefined> {
+    this.#expire();
+    const slot = this.#slot;
+    if (!slot || !slot.sessionId || slot.sessionDeadline === undefined || descriptor.streamId !== slot.streamId || descriptor.sessionId !== slot.sessionId || descriptor.generation !== slot.sessionGeneration || descriptor.deadline !== slot.sessionDeadline || !this.state.hasActive(slot.streamId) || !["session-issued", "grace"].includes(slot.state) || this.#graceExpired(slot)) return no(slot?.state === "connected" ? "limit" : "unauthorized");
+    return ok(undefined);
+  }
+
+  #rotateSession(slot: Slot): string {
+    const token = this.#token();
+    slot.sessionGeneration++;
+    slot.sessionId ??= uuid(this.entropy);
+    slot.sessionDeadline = this.clock.mono() + 60_000;
+    slot.sessionDigest = this.#digest(token, this.#sessionContext(slot));
+    return token;
+  }
+
+  #claimMatches(slot: Slot, token: string, ignorePermit=false): boolean {
+    if (!slot.claimDigest || !ignorePermit && this.clock.mono() >= slot.permitDeadline) return false;
+    return this.#compare(slot.claimDigest, this.#digest(token, this.#claimContext(slot)));
+  }
+
+  #mediaMatches(slot: Slot, token: string, states: readonly SlotState[]): boolean {
+    if (!states.includes(slot.state) || !slot.sessionDigest || !slot.sessionId || slot.sessionDeadline === undefined || this.clock.mono() >= slot.sessionDeadline) return false;
+    return this.#compare(slot.sessionDigest, this.#digest(token, this.#sessionContext(slot)));
+  }
+
+  #armPermit(slot: Slot): void {
+    if (slot.permitTimer) this.clock.clear(slot.permitTimer);
+    const deadline = slot.permitDeadline;
+    const generation = slot.generation;
+    slot.permitTimer = this.clock.set(Math.max(0, deadline - this.clock.mono()), () => {
+      void this.state.mutex.run(() => {
+        if (this.#slot !== slot || slot.generation !== generation || slot.permitDeadline !== deadline) return;
+        if (this.clock.mono() < deadline) return this.#armPermit(slot);
+        if (["armed", "claim-delivering", "claimed", "session-delivering"].includes(slot.state)) this.#vacate(slot);
+      });
+    });
+  }
+
+  #armSession(slot: Slot): void {
+    if (slot.sessionTimer) this.clock.clear(slot.sessionTimer);
+    const deadline = slot.sessionDeadline!;
+    const generation = slot.sessionGeneration;
+    slot.sessionTimer = this.clock.set(Math.max(0, deadline - this.clock.mono()), () => {
+      void this.state.mutex.run(() => {
+        if (this.#slot !== slot || slot.sessionGeneration !== generation || slot.sessionDeadline !== deadline) return;
+        if (this.clock.mono() < deadline) return this.#armSession(slot);
+        slot.sessionDigest = undefined;
+        slot.sessionTimer = undefined;
+        if (slot.state === "connected" || slot.state === "grace") this.#beginGrace(slot);
+        else if (slot.state === "session-issued") this.#vacate(slot);
+      });
+    });
+  }
+
+  #beginGrace(slot: Slot): void {
+    this.demandLost(slot.streamId);
+    if (slot.state !== "grace") {
+      slot.state = "grace";
+      if (this.state.hasActive(slot.streamId)) this.state.transitionLocked(slot.streamId, "grace", 0);
+    }
+    slot.graceDeadline ??= this.clock.mono() + 5_000;
+    if (!slot.graceTimer) this.#armGrace(slot);
+  }
+
+  #armGrace(slot: Slot): void {
+    const deadline = slot.graceDeadline!;
+    const timer = this.clock.set(Math.max(0, deadline - this.clock.mono()), () => {
+      if (slot.graceTimer !== timer || this.#slot !== slot || slot.graceDeadline !== deadline) return;
+      slot.graceTimer = undefined;
+      if (!this.#graceExpired(slot)) this.#armGrace(slot);
+    });
+    slot.graceTimer = timer;
+  }
+
+  #graceExpired(slot: Slot): boolean {
+    if (slot.graceDeadline === undefined || this.clock.mono() < slot.graceDeadline) return false;
+    this.demandLost(slot.streamId);
+    void this.state.terminal.request(slot.streamId, "lease-expired");
     return true;
   }
-  private armOrphanGrace(streamId: string, deadline=this.clock.mono()+5_000): void { if (this.#orphanTimer) this.clock.clear(this.#orphanTimer); this.#orphanStream=streamId; const timer=this.clock.set(Math.max(0,deadline-this.clock.mono()),()=>{if(this.#orphanTimer!==timer||this.#orphanStream!==streamId)return;this.#orphanTimer=undefined;if(!this.state.hasActive(streamId))return;if(this.clock.mono()<deadline){this.armOrphanGrace(streamId,deadline);return;}void this.state.terminal.request(streamId,"lease-expired");});this.#orphanTimer=timer; }
-  private expirePairing(): void { const s = this.#slot; if (s && ["pairing-pending","approved","bootstrap"].includes(s.state) && this.clock.mono() >= s.pairingDeadline) this.release(s); }
-  private release(s: Slot): void { if (s.pairingTimer) this.clock.clear(s.pairingTimer); if (this.#slot === s) this.#slot = undefined; }
-  private token(): string { const raw = this.entropy.bytes(32), token = Buffer.from(raw).toString("base64url"); raw.fill(0); return token; }
-  private digest(raw: string, context: string): Buffer { return createHmac("sha256", this.#key).update(context).update("\0").update(raw).digest(); }
-  private compare(a: Buffer, b: Buffer): boolean { return a.length === b.length && timingSafeEqual(a, b); }
-  private approveShape(v: unknown): v is ApproveRequest { if (typeof v !== "object" || v === null || ![Object.prototype, null].includes(Object.getPrototypeOf(v)) || Reflect.ownKeys(v).length !== 4) return false; for (const key of ["streamId","pairingId","pairingCode","viewerGrant"]) { const d = Object.getOwnPropertyDescriptor(v,key); if (!d?.enumerable || !("value" in d)) return false; } return typeof (v as {streamId?:unknown}).streamId === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test((v as {pairingId:string}).pairingId) && /^[0-9A-HJKMNP-TV-Z]{8}$/.test((v as {pairingCode:string}).pairingCode); }
+
+  #expire(): void {
+    const slot = this.#slot;
+    if (!slot) return;
+    const now = this.clock.mono();
+    if (now >= slot.permitDeadline && ["armed", "claim-delivering", "claimed", "session-delivering"].includes(slot.state)) { this.#vacate(slot); return; }
+    if (slot.sessionDeadline === undefined || now < slot.sessionDeadline) return;
+    slot.sessionDigest=undefined;
+    if (slot.sessionTimer) this.clock.clear(slot.sessionTimer);
+    slot.sessionTimer=undefined;
+    if (slot.state === "connected" || slot.state === "grace") this.#beginGrace(slot);
+    else if (slot.state === "session-issued") this.#vacate(slot);
+  }
+
+  #vacate(slot: Slot): void {
+    this.demandLost(slot.streamId);
+    for (const timer of [slot.permitTimer, slot.sessionTimer, slot.graceTimer]) if (timer) this.clock.clear(timer);
+    slot.permitTimer = undefined;
+    slot.priorSessionGeneration = undefined;
+    slot.sessionTimer = undefined;
+    slot.graceTimer = undefined;
+    slot.claimDigest = undefined;
+    slot.sessionDigest = undefined;
+    slot.sessionId = undefined;
+    slot.sessionDeadline = undefined;
+    slot.priorSessionDigest = undefined;
+    slot.priorSessionDeadline = undefined;
+    delete slot.graceDeadline;
+    slot.state = "vacant";
+    slot.delivery = 0;
+  }
+
+  #release(slot: Slot): void {
+    this.#vacate(slot);
+    if (this.#slot === slot) this.#slot = undefined;
+  }
+
+  #token(): string {
+    const raw = this.entropy.bytes(32);
+    const token = Buffer.from(raw).toString("base64url");
+    raw.fill(0);
+    return token;
+  }
+
+  #claimContext(slot: Slot): string { return `FSQ-Auto/v1:${slot.streamId}:${slot.permitDeadline}:${slot.generation}`; }
+  #sessionContext(slot: Slot): string { return `FSQ-Media/v1:${slot.streamId}:${slot.sessionId}:${slot.sessionDeadline}:${slot.generation}`; }
+  #digest(raw: string, context: string): Buffer { return createHmac("sha256", this.#key).update(context).update("\0").update(raw).digest(); }
+  #compare(left: Buffer, right: Buffer): boolean { return left.length === right.length && timingSafeEqual(left, right); }
+  #event(operation: string, outcome: string, slot: Slot): void {
+    if (AUTH_DIAGNOSTICS.hasSubscribers) AUTH_DIAGNOSTICS.publish(freeze({ operation, outcome, state: slot.state, generation: slot.generation }));
+  }
 }
-export function revealPairingBrowserToken(value: unknown): string { return BrowserToken.reveal(value as BrowserToken); }
-export function protectPairingBrowserToken(raw: string): unknown { return new BrowserToken(raw); }
