@@ -1,5 +1,7 @@
 # iOS WDA Video Observation Design
 
+- **Historical source:** This document preserves the completed `IOS-WDA-STANDALONE-01` design and acceptance record. GitHub Issue #2 owns the migrated completion ledger; this file no longer carries active plan, status, authorization, or approval state.
+
 - **Status:** Original iOS goal, size exception and ACK/profile SPEC gate confirmed; WP1–WP4 implementation, cumulative code review and all current standalone native acceptance passed after one focused Runtime timer repair. The user moved Appium Session-transition verification to the later Agent integration feature, so `IOS-WDA-STANDALONE-01` is Done. Android regression, unified CLI/MCP Agent integration and platform/support-matrix acceptance remain deferred.
 - **Date:** 2026-10-26
 - **Authorized workflow:** `/requirements-to-design` for design; `/spec-driven` for IOS-WDA-STANDALONE-01 only

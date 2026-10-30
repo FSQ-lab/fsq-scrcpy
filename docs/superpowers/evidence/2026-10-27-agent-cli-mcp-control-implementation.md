@@ -1,6 +1,6 @@
 # Unified Android/iOS CLI and MCP Control — Implementation Evidence
 
-Historical implementation and acceptance evidence moved from the confirmed design. This file is not an active design or SPEC input unless a task package explicitly lists it.
+Historical implementation and acceptance evidence moved from the confirmed design. This file is provenance only; GitHub Issues own current scope, status, priority, dependencies, and acceptance evidence.
 
 ## ANDROID-AUTO-BINDING-MACOS-01
 

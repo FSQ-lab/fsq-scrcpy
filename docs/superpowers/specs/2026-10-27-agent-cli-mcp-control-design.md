@@ -1,5 +1,7 @@
 # Unified FSQ_scrcpy Android/iOS CLI and MCP Control Design
 
+- **Historical source:** This former sequential plan is retained only as design provenance. GitHub Issues own current scope, priority, dependencies, status, and acceptance; Issue #2 owns the migrated `IOS-AUTO-BINDING-MACOS-09` completion record.
+
 - **Status:** confirmed by the user; independent full review plus repair-only rounds 1–2 passed; explicit `/spec-driven` authorization received for the sequential feature plan. Implementation remains gated by the current Android regression, per-feature SPEC confirmation, selection evidence, verification and independent audit.
 - **Date:** 2026-10-27
 - **Authorized workflows:** `/requirements-to-design` produced and reviewed this design; `/spec-driven docs/superpowers/specs/2026-10-27-agent-cli-mcp-control-design.md` authorizes only the confirmed sequential FSQ_scrcpy scope. `Appium_connect_agent` still requires its own repository workflow.
@@ -901,4 +903,4 @@ The user subsequently supplied the explicit `/spec-driven` invocation for this p
 
 ## Implementation evidence
 
-Completed-feature implementation, audit and real-acceptance records are historical evidence, not active design input. They are maintained in [the implementation evidence ledger](../evidence/2026-10-27-agent-cli-mcp-control-implementation.md) and are read only when a task package explicitly lists them.
+Completed-feature implementation, audit and real-acceptance records are historical provenance, not active design input. Current completion and acceptance state is maintained in the owning GitHub Issues; the legacy evidence ledger remains available at [the implementation evidence ledger](../evidence/2026-10-27-agent-cli-mcp-control-implementation.md).

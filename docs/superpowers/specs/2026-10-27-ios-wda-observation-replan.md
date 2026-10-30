@@ -1,5 +1,7 @@
 # iOS WDA Observation — Design Repair and Gate Decision
 
+- **Historical source:** This document preserves the completed `IOS-WDA-STANDALONE-01` repair and gate record. GitHub Issue #2 owns the migrated completion ledger; this file no longer carries active plan, status, authorization, or approval state.
+
 - Status: confirmed ACK/profile SPEC and one-feature exception implemented; WP3 full+repair1 and WP4 cumulative full+repair1 code audits closed all findings. Native iPhone/WDA/Chrome standalone acceptance now includes real grace-expiry cleanup and exact reason-3/no-Config wire evidence after one focused Runtime timer repair. The user moved Appium Session-transition verification to the later Agent integration feature, so `IOS-WDA-STANDALONE-01` is Done; Android regression, unified CLI/MCP Agent integration and platform/support-matrix acceptance remain deferred.
 - Authorization: the original design/review scope was renewed by explicit spec-driven authorization for the1600/2000/350 exception, its AGENTS/design record and subsequent ACK/profile gate→WP3→WP4 sequence. No implementation starts before SPEC confirmation; no other feature/platform/dependency or prohibited operation is authorized.
 - Source design: [2026-10-26 design](2026-10-26-ios-wda-observation-design.md), SHA-256 `c447be999e1a32fe2feec9c38438a19e2bd336c03a672839e3f5a266c832373c` before this repair.
