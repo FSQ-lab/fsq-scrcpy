@@ -9,7 +9,7 @@ import test from "node:test";
 import { CONTROL_VERSION, controlError, type AcquireRuntimeRequest, type RuntimeControl, type RuntimeInstance } from "../../contracts/src/index.js";
 import { acquireInternals } from "../src/acquire.js";
 import * as runtimePublic from "../src/index.js";
-import { LocalRuntimeState, type AndroidRuntimeSlot, type RuntimeGenerationState } from "../src/control-state.js";
+import { LocalRuntimeState, type AndroidRuntimeSlot, type RuntimeGenerationState, type RuntimeSlot } from "../src/control-state.js";
 import { ownerTestInternals, type RuntimeOwnerLocal } from "../src/owner.js";
 
 class FakeChild extends EventEmitter {
@@ -105,7 +105,7 @@ async function raceState(): Promise<Readonly<{ parent: string; state: LocalRunti
   const state = new LocalRuntimeState(join(parent, "state")), slot = (await state.initialize(RACE_BINDING, 1_800_000_000_000)).slot;
   return Object.freeze({ parent, state, slot, close: () => rm(parent, { recursive: true, force: true }) });
 }
-function instance(slot: AndroidRuntimeSlot, target: Readonly<{ instanceId: string; generation: string }>): RuntimeInstance {
+function instance(slot: RuntimeSlot, target: Readonly<{ instanceId: string; generation: string }>): RuntimeInstance {
   return Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
 }
 
@@ -127,9 +127,9 @@ await test("start-or-attach adopts reset authority, respawns, and old cleanup ca
     now: () => fixture.slot.createdAt + 2,
   });
   const children: FakeChild[] = [];
-  const spawned: AndroidRuntimeSlot[] = [];
+  const spawned: RuntimeSlot[] = [];
   let bootstraps = 0;
-  let helloSlot: AndroidRuntimeSlot | undefined;
+  let helloSlot: RuntimeSlot | undefined;
   let newGeneration: RuntimeGenerationState | undefined;
   let oldCleanup = true;
   const request: AcquireRuntimeRequest = Object.freeze({ mode: "start-or-attach", selector: Object.freeze({ kind: "known", deviceRef: fixture.slot.deviceRef }) });

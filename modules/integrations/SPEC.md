@@ -14,34 +14,34 @@
 
 ## `ANDROID-CLI-MACOS-03` Scope
 
-平台组合固定为本地 macOS arm64、恰好一台已授权 USB Android、persistent RuntimeControl 和 standalone Chrome Viewer。`ANDROID-CLI-MACOS-03`建立基础CLI；下方`ANDROID-CLI-WATCH-MACOS-04B`新增provider wait映射。Model Context Protocol、Windows、iOS、embedded Viewer、远程、多个设备/流/Viewer及支持矩阵条目仍不在范围内。
+平台组合覆盖本地 macOS arm64 上已验收的 Android Runtime，以及 `IOS-RUNTIME-CLI-MACOS-10` 的外部 owner-managed WDA v16.15.3/fixed loopback source。两者复用同一 CLI、RuntimeControl 和 standalone Chrome Viewer；MCP、Windows、embedded Viewer、远程、多个同平台设备/流/Viewer及支持矩阵条目仍不在范围内。
 
 ## Exact Command Surface
 
 ```text
-fsq-scrcpy viewer ensure (--platform android | --device-ref <uuid>) [--json]
+fsq-scrcpy viewer ensure (--platform android|ios | --device-ref <uuid>) [--json]
 fsq-scrcpy stream inspect --stream-id <uuid> [--after-revision <N>] [--json]
 fsq-scrcpy stream wait --stream-id <uuid> --after-revision <N> [--wait-ms <N>] --json
 fsq-scrcpy stream watch --stream-id <uuid> [--after-revision <N>] --json-seq
 fsq-scrcpy stream stop --stream-id <uuid> [--expected-revision <N>] [--json]
 fsq-scrcpy runtime shutdown --device-ref <uuid> [--json]
-fsq-scrcpy local-state status --platform android [--json]
+fsq-scrcpy local-state status --platform android|ios [--json]
 fsq-scrcpy local-state reset-control --platform android --device-ref <uuid> [--json]
 fsq-scrcpy local-state rebind-device --platform android --device-ref <uuid> [--json]
 ```
 
 - 只接受上述两段 command path 与长选项；无短别名、额外 positional、`--yes`、`--force`、环境变量配置或隐式平台。`--name value` 与 `--name=value` 等价。
 - 先识别精确 command path，再以 `strict:true, allowPositionals:false, allowNegative:false, tokens:true` 解析其余参数；未知、重复、缺失、额外、冲突 option 及 `--` 在任何 filesystem/ADB/socket/spawn I/O 前失败。`tokens` 必须用于拒绝 `parseArgs` 默认 last-wins 的重复项。
-- UUID 为 canonical lowercase non-nil v4；revision 为无前导零的正十进制 safe integer；本 feature 的 platform 只接受 `android`。
+- UUID 为 canonical lowercase non-nil v4；revision 为无前导零的正十进制 safe integer。`viewer ensure`与`local-state status`的platform只接受`android|ios`；reset/rebind仍只接受`android`。
 - `--device-ref` 是已有完整本机 `DeviceRef.opaqueId` 的比较值；CLI 不自行拼接 namespace、生成或 remap identity。
 
 ## Operation Mapping
 
-- owner-local只读status是所有stored-identity命令的唯一lookup：`uninitialized`映射instance-not-found，failure原样返回，ready提供完整DeviceRef；带`--device-ref <opaqueId>`时必须与该完整DeviceRef.opaqueId相等，否则instance-conflict。CLI从不拼namespace或调用private locator。
-- `viewer ensure --platform android`唯一执行`start-or-attach + auto selector + ensureViewer`；`--device-ref`先走上述lookup，再以完整DeviceRef执行`start-or-attach + known selector`。成功的`attachment.disposition`表示`started|attached`，不另增start/attach命令。
+- owner-local只读status是stored-identity lookup的唯一状态入口：`uninitialized`忽略，failure原样返回，ready提供完整DeviceRef。带`--device-ref <opaqueId>`时在Android/iOS slot中要求唯一匹配，否则instance-conflict或device-ambiguous；无opaqueId时优先选择唯一live identity，否则选择唯一ready identity，多候选fail closed为device-ambiguous。CLI从不拼namespace或调用private locator。
+- `viewer ensure --platform android|ios`唯一执行`start-or-attach + same-platform auto selector + ensureViewer`；`--device-ref`先走上述lookup，再以完整DeviceRef执行`start-or-attach + known selector`。成功的`attachment.disposition`表示`started|attached`，不另增start/attach命令。
 - inspect/wait/watch/stop先走上述无opaqueId lookup，并只用`acquireRuntime({mode:"attach-only",selector:{kind:"known",deviceRef}})`；这些命令绝不auto、初始化slot、调用resolver、spawn Runtime或重启terminal stream。
-- shutdown先以其opaqueId走上述lookup，再调用owner-local`shutdownRuntime({deviceRef})`；owner-local内部绑定authenticated current target，CLI不提供target。CLI/session close绝不等于shutdown。
-- status 严格只读：不创建目录/slot、清 temp、重建 generation、解析设备、启动 Runtime 或修复状态。
+- shutdown以opaqueId在两个平台slot中lookup，再调用owner-local`shutdownRuntime({deviceRef})`；owner-local内部由DeviceRef.platform选择state并绑定authenticated current target，CLI不提供target。CLI/session close绝不等于shutdown。
+- status严格按显式platform只读：不创建目录/slot、清temp、重建generation、解析设备、启动Runtime或修复状态。
 - reset/rebind 只调用 Runtime owner-local maintenance seam；Integrations 不读取、删除或改写私有状态文件。
 
 ## Safe Results
@@ -50,7 +50,7 @@ fsq-scrcpy local-state rebind-device --platform android --device-ref <uuid> [--j
 
 - ensure success：`{ok:true,value:{attachment,deviceRef,descriptor,snapshot}}`，三个DeviceRef必须完全相同；失败不得带partial attachment/session。
 - inspect/stop/shutdown：对应既有exact `ControlResult`；只有stop revision conflict可携带unchanged snapshot。
-- status success为`{ok:true,value:{platform:"android",state:"uninitialized"}}`，或`{ok:true,value:{platform:"android",state:"ready",deviceRef,stateRevision,runtime:{state:"not-running"}}}`，或同一ready value且runtime为`{state:"live",target:{instanceId,generation}}`。
+- status success为`{ok:true,value:{platform:"android"|"ios",state:"uninitialized"}}`，或同platform的`ready{deviceRef,stateRevision,runtime:{state:"not-running"|"live",target?}}` exact value；ready DeviceRef.platform 必须等于status platform。
 - reset/rebind success：`{ok:true,value:{applied,platform:"android",previousDeviceRef,deviceRef,previousStateRevision,stateRevision}}`。拒绝确认时`applied:false`且两个identity/revision不变；reset applied时identity不变且revision恰加一；rebind applied时产生新DeviceRef且revision恰加一。
 - Integrations-owned `CliError`是exact frozen `{code,disposition:"usage",operationState:"not-applied",safeMessage}`；唯一组合是`invalid-cli-syntax / Invalid command syntax.`与`confirmation-required / Interactive confirmation is required.`。其唯一observable failure wrapper恰为exact frozen`{ok:false,error:CliError}`；CLI validator逐层拒绝额外字段。Runtime-owned non-wire`RuntimeLiveError`由Runtime SPEC定义；其余失败复用既有ControlError。
 

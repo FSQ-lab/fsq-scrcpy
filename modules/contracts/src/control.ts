@@ -15,7 +15,7 @@ import {
 export const CONTROL_VERSION = Object.freeze({ major: 1 as const, minor: 0 as const });
 export type ControlVersion = Readonly<{ major: 1; minor: 0 }>;
 export type RuntimeTarget = Readonly<{ instanceId: string; generation: string }>;
-export type DeviceSelector = Readonly<{ kind: "auto"; platform: "android" }> | Readonly<{ kind: "known"; deviceRef: DeviceRef }>;
+export type DeviceSelector = Readonly<{ kind: "auto"; platform: "android" | "ios" }> | Readonly<{ kind: "known"; deviceRef: DeviceRef }>;
 export type RuntimeInstance = Readonly<{ controlVersion: ControlVersion; instanceId: string; generation: string; contractVersion: 2; deviceRef: DeviceRef; features: readonly ["wait-v1", "auto-bootstrap-v1"] }>;
 export type RuntimeAttachment = Readonly<{ disposition: "started" | "attached"; instance: RuntimeInstance }>;
 export type AcquireRuntimeRequest = Readonly<{ mode: "attach-only" | "start-or-attach"; selector: DeviceSelector }>;
@@ -69,14 +69,14 @@ export function validateControlVersion(value: unknown): ControlVersion { const v
 export function validateRuntimeTarget(value: unknown): RuntimeTarget { const v = exact(value, ["instanceId", "generation"]); validateStreamId(v.instanceId); validateStreamId(v.generation); return value as RuntimeTarget; }
 export function validateDeviceSelector(value: unknown): DeviceSelector {
   const object = ordinary(value) ? value : fail();
-  if (object.kind === "auto") { const v = exact(object, ["kind", "platform"]); if (v.platform !== "android") return fail(); return object as DeviceSelector; }
-  const v = exact(object, ["kind", "deviceRef"]); if (v.kind !== "known") return fail(); const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") return fail(); return object as DeviceSelector;
+  if (object.kind === "auto") { const v = exact(object, ["kind", "platform"]); if (v.platform !== "android" && v.platform !== "ios") return fail(); return object as DeviceSelector; }
+  const v = exact(object, ["kind", "deviceRef"]); if (v.kind !== "known") return fail(); validateDeviceRef(v.deviceRef); return object as DeviceSelector;
 }
 export function validateAcquireRuntimeRequest(value: unknown): AcquireRuntimeRequest { const v = exact(value, ["mode", "selector"]); if (v.mode !== "attach-only" && v.mode !== "start-or-attach") fail(); validateDeviceSelector(v.selector); return value as AcquireRuntimeRequest; }
 export function validateWaitControlRequest(value: unknown): WaitControlRequest { const v = exact(value, ["streamId", "afterRevision", "waitMs"]); validateStreamId(v.streamId); safeInteger(v.afterRevision, 1); if (safeInteger(v.waitMs) > 30_000) fail(); return value as WaitControlRequest; }
 export function validateWaitControlWireRequest(value: unknown): WaitControlWireRequest { const v = exact(value, ["controlVersion", "target", "streamId", "afterRevision", "waitMs"]); validateControlVersion(v.controlVersion); validateRuntimeTarget(v.target); validateWaitControlRequest({ streamId: v.streamId, afterRevision: v.afterRevision, waitMs: v.waitMs }); return value as WaitControlWireRequest; }
 export function validateRuntimeInstance(value: unknown): RuntimeInstance {
-  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 3 || v.features.length !== 2 || v.features[0] !== "wait-v1" || v.features[1] !== "auto-bootstrap-v1") fail(); for (const key of ["0", "1"]) { const descriptor = Object.getOwnPropertyDescriptor(v.features, key); if (!descriptor?.enumerable || !("value" in descriptor)) fail(); } const device = validateDeviceRef(v.deviceRef); if (device.platform !== "android") fail(); return value as RuntimeInstance;
+  const v = exact(value, ["controlVersion", "instanceId", "generation", "contractVersion", "deviceRef", "features"]); validateControlVersion(v.controlVersion); validateStreamId(v.instanceId); validateStreamId(v.generation); if (v.contractVersion !== CONTRACT_VERSION || !Array.isArray(v.features) || Object.getPrototypeOf(v.features) !== Array.prototype || Reflect.ownKeys(v.features).length !== 3 || v.features.length !== 2 || v.features[0] !== "wait-v1" || v.features[1] !== "auto-bootstrap-v1") fail(); for (const key of ["0", "1"]) { const descriptor = Object.getOwnPropertyDescriptor(v.features, key); if (!descriptor?.enumerable || !("value" in descriptor)) fail(); } validateDeviceRef(v.deviceRef); return value as RuntimeInstance;
 }
 export function validateRuntimeAttachment(value: unknown): RuntimeAttachment { const v = exact(value, ["disposition", "instance"]); if (v.disposition !== "started" && v.disposition !== "attached") fail(); validateRuntimeInstance(v.instance); return value as RuntimeAttachment; }
 export function validateControlError(value: unknown): ControlError {

@@ -305,7 +305,7 @@ export const validateLocalStateStatusResult = value => value;
 export const validateResetControlStateResult = value => value;
 export const validateRebindDeviceResult = value => value;
 export function createRuntimeOwnerLocal() {
-  return Object.freeze({ async inspectLocalState() { return status; }, async close() {}, async [Symbol.asyncDispose]() {} });
+  return Object.freeze({ async inspectLocalState(input) { return input.platform === "ios" ? Object.freeze({ ok: true, value: Object.freeze({ platform: "ios", state: "uninitialized" }) }) : status; }, async close() {}, async [Symbol.asyncDispose]() {} });
 }
 `);
   await writeFile(index, `

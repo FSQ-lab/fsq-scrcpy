@@ -1,13 +1,13 @@
 import { parseArgs } from "node:util";
 
 export type CliCommand =
-  | Readonly<{ path: "viewer ensure"; json: boolean; platform?: "android"; deviceRef?: string }>
+  | Readonly<{ path: "viewer ensure"; json: boolean; platform?: "android" | "ios"; deviceRef?: string }>
   | Readonly<{ path: "stream inspect"; json: boolean; streamId: string; afterRevision?: number }>
   | Readonly<{ path: "stream wait"; json: true; streamId: string; afterRevision: number; waitMs: number }>
   | Readonly<{ path: "stream watch"; jsonSeq: true; streamId: string; afterRevision?: number }>
   | Readonly<{ path: "stream stop"; json: boolean; streamId: string; expectedRevision?: number }>
   | Readonly<{ path: "runtime shutdown"; json: boolean; deviceRef: string }>
-  | Readonly<{ path: "local-state status"; json: boolean; platform: "android" }>
+  | Readonly<{ path: "local-state status"; json: boolean; platform: "android" | "ios" }>
   | Readonly<{ path: "local-state reset-control"; json: boolean; platform: "android"; deviceRef: string }>
   | Readonly<{ path: "local-state rebind-device"; json: boolean; platform: "android"; deviceRef: string }>;
 
@@ -72,7 +72,7 @@ export function parseCommand(argv: readonly string[]): CliCommand | undefined {
     if (path === "viewer ensure") {
       const platform = values.platform, deviceRef = values["device-ref"];
       if (has(values, "platform") === has(values, "device-ref")) return;
-      if (platform !== undefined && platform !== "android" || deviceRef !== undefined && !uuid(deviceRef)) return;
+      if (platform !== undefined && platform !== "android" && platform !== "ios" || deviceRef !== undefined && !uuid(deviceRef)) return;
       return Object.freeze({ path, json, ...(platform ? { platform } : { deviceRef: deviceRef as string }) });
     }
     if (path === "stream inspect" || path === "stream stop") {
@@ -88,8 +88,9 @@ export function parseCommand(argv: readonly string[]): CliCommand | undefined {
       return uuid(deviceRef) ? Object.freeze({ path, json, deviceRef }) : undefined;
     }
     const platform = values.platform;
-    if (platform !== "android") return;
+    if (platform !== "android" && platform !== "ios") return;
     if (path === "local-state status") return Object.freeze({ path, json, platform });
+    if (platform !== "android") return;
     const deviceRef = values["device-ref"];
     if (!uuid(deviceRef)) return;
     if (path === "local-state reset-control") return Object.freeze({ path, json, platform, deviceRef });

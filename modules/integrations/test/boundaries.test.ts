@@ -66,7 +66,7 @@ function harness(attachment: unknown = ATTACHMENT): Harness {
     async close() { value.touches.push("session-close"); },
   } as unknown as RuntimeControlSession;
   const owner: RuntimeOwnerLocal = {
-    async inspectLocalState() { value.touches.push("status"); return value.statusResult as never; },
+    async inspectLocalState(input) { value.touches.push(`status:${input.platform}`); return (input.platform === "ios" ? { ok: true, value: { platform: "ios", state: "uninitialized" } } : value.statusResult) as never; },
     async shutdownRuntime() { value.touches.push("shutdown"); return value.controlResult as never; },
     async resetControlState() { value.touches.push("reset"); return value.controlResult as never; },
     async rebindDevice() { value.touches.push("rebind"); return value.controlResult as never; },
@@ -128,7 +128,7 @@ await test("canonical v4 UUID validation rejects nil, version, variant, case, an
 await test("revision grammar admits the safe maximum and rejects every noncanonical numeric form", async () => {
   const accepted = await run(["stream", "inspect", "--stream-id", STREAM_ID, "--after-revision", `${Number.MAX_SAFE_INTEGER}`]);
   assert.equal(accepted.code, 0);
-  assert.deepEqual(accepted.harness.touches.slice(0, 3), ["owner-create", "status", "acquire"]);
+  assert.deepEqual(accepted.harness.touches.slice(0, 4), ["owner-create", "status:android", "status:ios", "acquire"]);
   for (const revision of ["0", "00", "01", "+1", "-1", "1.0", "1e1", " 1", "9007199254740992"]) {
     const result = await run(["stream", "stop", "--stream-id", STREAM_ID, "--expected-revision", revision]);
     assert.equal(result.code, 2, revision);
@@ -203,7 +203,7 @@ await test("malformed status and owner errors are converted without exposing the
   assert.equal(result.code, 5);
   assert.equal((result.value.error as Record<string, unknown>).code, "runtime-exited");
   assert.equal(result.stdout.includes("owner-private"), false);
-  assert.deepEqual(result.harness.touches, ["owner-create", "status", "owner-close"]);
+  assert.deepEqual(result.harness.touches, ["owner-create", "status:android", "owner-close"]);
 });
 
 await test("an abort while waiting for RESET returns request-cancelled instead of a decline", async () => {
@@ -235,6 +235,6 @@ await test("owner-local safe failures retain their exact tuple and exit mapping"
     assert.equal(result.code, exit);
     assert.deepEqual(result.value, { ok: false, error: controlError(code) });
     assert.equal(result.stderr, "");
-    assert.deepEqual(result.harness.touches, ["owner-create", "status", "owner-close"]);
+    assert.deepEqual(result.harness.touches, ["owner-create", "status:android", "owner-close"]);
   }
 });

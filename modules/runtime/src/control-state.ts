@@ -7,16 +7,19 @@ import { dirname, join, resolve } from "node:path";
 import { validateDeviceRef, validateRuntimeTarget, type DeviceRef, type RuntimeTarget } from "../../contracts/src/index.js";
 import { resolveSingleAndroidBinding, revealAndroidBinding, type ResolvedAndroidBinding } from "../../capture/src/index.js";
 
-export interface AndroidRuntimeSlot {
+export type RuntimePlatform = "android" | "ios";
+interface RuntimeSlotBase {
   readonly stateVersion: 1;
   readonly revision: number;
-  readonly platform: "android";
   readonly deviceRef: DeviceRef;
-  readonly binding: ResolvedAndroidBinding;
   readonly control: Readonly<{ port: number; credential: string }>;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
+export interface AndroidRuntimeSlot extends RuntimeSlotBase { readonly platform: "android"; readonly binding: ResolvedAndroidBinding }
+export interface IosRuntimeSlot extends RuntimeSlotBase { readonly platform: "ios" }
+export type RuntimeSlot = AndroidRuntimeSlot | IosRuntimeSlot;
+export type RuntimeSlotFor<P extends RuntimePlatform> = P extends "android" ? AndroidRuntimeSlot : IosRuntimeSlot;
 export interface RuntimeGenerationState {
   readonly runtimeStateVersion: 1;
   readonly deviceRef: DeviceRef;
@@ -41,16 +44,21 @@ export class LocalStateFailure extends Error {
   }
 }
 const B64 = /^[A-Za-z0-9_-]{43}$/;
-const TEMP = /^\.android-only\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.tmp$/;
+const TEMP_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const tempPattern = (platform: RuntimePlatform): RegExp => new RegExp(`^\\.${platform}-only\\.${TEMP_UUID}\\.tmp$`);
 const canonicalCredential = (value: string): boolean => { if (!B64.test(value)) return false; const bytes = Buffer.from(value, "base64url"); try { return bytes.byteLength === 32 && bytes.toString("base64url") === value; } finally { bytes.fill(0); } };
 const fixedRoot = (): string => join(userInfo().homedir, "Library", "Application Support", "FSQ_scrcpy");
 const ordinary = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value) && [Object.prototype, null].includes(Object.getPrototypeOf(value));
 const exact = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => ordinary(value) && Reflect.ownKeys(value).length === keys.length && keys.every((key) => { const d = Object.getOwnPropertyDescriptor(value, key); return !!d?.enumerable && "value" in d; });
 const freezeBinding = (value: ResolvedAndroidBinding): ResolvedAndroidBinding => Object.freeze({ serial: value.serial, adbPath: value.adbPath, cacheRoot: value.cacheRoot, artifactSource: Object.freeze({ mode: "online" }) });
-const freezeSlot = (value: AndroidRuntimeSlot): AndroidRuntimeSlot => Object.freeze({ ...value, deviceRef: Object.freeze({ ...value.deviceRef }), binding: freezeBinding(value.binding), control: Object.freeze({ ...value.control }) });
-const canonicalSlot = (value: AndroidRuntimeSlot): string => JSON.stringify({ stateVersion: 1, revision: value.revision, platform: "android", deviceRef: { contractVersion: 2, platform: "android", namespace: value.deviceRef.namespace, opaqueId: value.deviceRef.opaqueId }, binding: { serial: value.binding.serial, adbPath: value.binding.adbPath, cacheRoot: value.binding.cacheRoot, artifactSource: { mode: "online" } }, control: { port: value.control.port, credential: value.control.credential }, createdAt: value.createdAt, updatedAt: value.updatedAt });
-const canonicalGeneration = (value: RuntimeGenerationState): string => JSON.stringify({ runtimeStateVersion: 1, deviceRef: { contractVersion: 2, platform: "android", namespace: value.deviceRef.namespace, opaqueId: value.deviceRef.opaqueId }, instanceId: value.instanceId, generation: value.generation, port: value.port, createdAt: value.createdAt, ready: true });
-const sameBinding = (a: ResolvedAndroidBinding, b: ResolvedAndroidBinding): boolean => a.serial === b.serial && a.adbPath === b.adbPath && a.cacheRoot === b.cacheRoot && a.artifactSource.mode === b.artifactSource.mode;
+const freezeSlot = (value: RuntimeSlot): RuntimeSlot => value.platform === "android"
+  ? Object.freeze({ ...value, deviceRef: Object.freeze({ ...value.deviceRef }), binding: freezeBinding(value.binding), control: Object.freeze({ ...value.control }) })
+  : Object.freeze({ ...value, deviceRef: Object.freeze({ ...value.deviceRef }), control: Object.freeze({ ...value.control }) });
+const canonicalSlot = (value: RuntimeSlot): string => value.platform === "android"
+  ? JSON.stringify({ stateVersion: 1, revision: value.revision, platform: "android", deviceRef: { contractVersion: 2, platform: "android", namespace: value.deviceRef.namespace, opaqueId: value.deviceRef.opaqueId }, binding: { serial: value.binding.serial, adbPath: value.binding.adbPath, cacheRoot: value.binding.cacheRoot, artifactSource: { mode: "online" } }, control: { port: value.control.port, credential: value.control.credential }, createdAt: value.createdAt, updatedAt: value.updatedAt })
+  : JSON.stringify({ stateVersion: 1, revision: value.revision, platform: "ios", deviceRef: { contractVersion: 2, platform: "ios", namespace: value.deviceRef.namespace, opaqueId: value.deviceRef.opaqueId }, control: { port: value.control.port, credential: value.control.credential }, createdAt: value.createdAt, updatedAt: value.updatedAt });
+const canonicalGeneration = (value: RuntimeGenerationState): string => JSON.stringify({ runtimeStateVersion: 1, deviceRef: { contractVersion: 2, platform: value.deviceRef.platform, namespace: value.deviceRef.namespace, opaqueId: value.deviceRef.opaqueId }, instanceId: value.instanceId, generation: value.generation, port: value.port, createdAt: value.createdAt, ready: true });
+const sameBinding = (slot: RuntimeSlot, binding: ResolvedAndroidBinding | undefined): boolean => slot.platform === "ios" ? binding === undefined : !!binding && slot.binding.serial === binding.serial && slot.binding.adbPath === binding.adbPath && slot.binding.cacheRoot === binding.cacheRoot && slot.binding.artifactSource.mode === binding.artifactSource.mode;
 const sameDevice = (left: DeviceRef, right: DeviceRef): boolean => left.contractVersion === right.contractVersion && left.platform === right.platform && left.namespace === right.namespace && left.opaqueId === right.opaqueId;
 const effectiveUid = (): number => { const value = process.geteuid?.(); if (value === undefined) throw new LocalStateFailure("local-state-recovery-required"); return value; };
 const checkCancellation=(signal?:AbortSignal):void=>{if(signal?.aborted)throw new LocalStateFailure("request-cancelled");};
@@ -98,25 +106,36 @@ async function reservePort(excluded?: number): Promise<PortReservation> {
 }
 async function candidatePort(): Promise<number> { const reserved = await reservePort(); try { return reserved.port; } finally { await reserved.close(); } }
 
-function parseSlot(source: string): AndroidRuntimeSlot {
+function parseSlot(source: string, expectedPlatform: RuntimePlatform = "android"): RuntimeSlot {
   let value: unknown; try { value = JSON.parse(source); } catch { throw new LocalStateFailure("local-state-recovery-required"); }
-  if (!exact(value, ["stateVersion", "revision", "platform", "deviceRef", "binding", "control", "createdAt", "updatedAt"]) || value.stateVersion !== 1 || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 || value.platform !== "android") throw new LocalStateFailure("local-state-recovery-required");
-  const binding = value.binding, control = value.control;
-  if (!exact(binding, ["serial", "adbPath", "cacheRoot", "artifactSource"]) || typeof binding.serial !== "string" || binding.serial.length < 1 || binding.serial.length > 256 || /[^\x21-\x7e]/.test(binding.serial) || typeof binding.adbPath !== "string" || resolve(binding.adbPath) !== binding.adbPath || typeof binding.cacheRoot !== "string" || resolve(binding.cacheRoot) !== binding.cacheRoot || !exact(binding.artifactSource, ["mode"]) || binding.artifactSource.mode !== "online") throw new LocalStateFailure("local-state-recovery-required");
+  const keys = expectedPlatform === "android"
+    ? ["stateVersion", "revision", "platform", "deviceRef", "binding", "control", "createdAt", "updatedAt"]
+    : ["stateVersion", "revision", "platform", "deviceRef", "control", "createdAt", "updatedAt"];
+  if (!exact(value, keys) || value.stateVersion !== 1 || !Number.isSafeInteger(value.revision) || (value.revision as number) < 1 || value.platform !== expectedPlatform) throw new LocalStateFailure("local-state-recovery-required");
+  const control = value.control;
   if (!exact(control, ["port", "credential"]) || !Number.isInteger(control.port) || (control.port as number) < 49_152 || (control.port as number) > 65_535 || typeof control.credential !== "string" || !canonicalCredential(control.credential) || !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0 || !Number.isSafeInteger(value.updatedAt) || (value.updatedAt as number) < (value.createdAt as number)) throw new LocalStateFailure("local-state-recovery-required");
-  let deviceRef: DeviceRef; try { deviceRef = validateDeviceRef(value.deviceRef); } catch { throw new LocalStateFailure("local-state-recovery-required"); } if (deviceRef.platform !== "android") throw new LocalStateFailure("local-state-recovery-required");
-  const slot = freezeSlot({ stateVersion: 1, revision: value.revision as number, platform: "android", deviceRef, binding: binding as unknown as ResolvedAndroidBinding, control: control as { port: number; credential: string }, createdAt: value.createdAt as number, updatedAt: value.updatedAt as number });
+  let deviceRef: DeviceRef; try { deviceRef = validateDeviceRef(value.deviceRef); } catch { throw new LocalStateFailure("local-state-recovery-required"); }
+  if (deviceRef.platform !== expectedPlatform) throw new LocalStateFailure("local-state-recovery-required");
+  let slot: RuntimeSlot;
+  if (expectedPlatform === "android") {
+    const binding = value.binding;
+    if (!exact(binding, ["serial", "adbPath", "cacheRoot", "artifactSource"]) || typeof binding.serial !== "string" || binding.serial.length < 1 || binding.serial.length > 256 || /[^\x21-\x7e]/.test(binding.serial) || typeof binding.adbPath !== "string" || resolve(binding.adbPath) !== binding.adbPath || typeof binding.cacheRoot !== "string" || resolve(binding.cacheRoot) !== binding.cacheRoot || !exact(binding.artifactSource, ["mode"]) || binding.artifactSource.mode !== "online") throw new LocalStateFailure("local-state-recovery-required");
+    slot = freezeSlot({ stateVersion: 1, revision: value.revision as number, platform: "android", deviceRef, binding: binding as unknown as ResolvedAndroidBinding, control: control as { port: number; credential: string }, createdAt: value.createdAt as number, updatedAt: value.updatedAt as number });
+  } else {
+    if (deviceRef.namespace !== "fsq.ios.local" || value.revision !== 1 || value.createdAt !== value.updatedAt) throw new LocalStateFailure("local-state-recovery-required");
+    slot = freezeSlot({ stateVersion: 1, revision: 1, platform: "ios", deviceRef, control: control as { port: number; credential: string }, createdAt: value.createdAt as number, updatedAt: value.updatedAt as number });
+  }
   if (canonicalSlot(slot) !== source) throw new LocalStateFailure("local-state-recovery-required"); return slot;
 }
-function parseGeneration(source: string, slot: AndroidRuntimeSlot): RuntimeGenerationState {
+function parseGeneration(source: string, slot: Readonly<{ deviceRef: DeviceRef; control: Readonly<{ port: number }> }>): RuntimeGenerationState {
   let value: unknown; try { value = JSON.parse(source); } catch { throw new LocalStateFailure("local-state-recovery-required"); }
   if (!exact(value, ["runtimeStateVersion", "deviceRef", "instanceId", "generation", "port", "createdAt", "ready"]) || value.runtimeStateVersion !== 1 || value.ready !== true || value.port !== slot.control.port || !Number.isSafeInteger(value.createdAt) || (value.createdAt as number) < 0) throw new LocalStateFailure("local-state-recovery-required");
   let deviceRef: DeviceRef, target: RuntimeTarget; try { deviceRef = validateDeviceRef(value.deviceRef); target = validateRuntimeTarget({ instanceId: value.instanceId, generation: value.generation }); } catch { throw new LocalStateFailure("local-state-recovery-required"); }
   if (JSON.stringify(deviceRef) !== JSON.stringify(slot.deviceRef)) throw new LocalStateFailure("local-state-recovery-required"); const result = Object.freeze({ runtimeStateVersion: 1 as const, deviceRef: Object.freeze({ ...deviceRef }), ...target, port: slot.control.port, createdAt: value.createdAt as number, ready: true as const }); if (canonicalGeneration(result) !== source) throw new LocalStateFailure("local-state-recovery-required"); return result;
 }
-export class LocalRuntimeState {
+export class LocalRuntimeState<P extends RuntimePlatform = "android"> {
   readonly root: string; readonly devices: string; readonly runtime: string; readonly slotPath: string;#rootIdentity:PathIdentity|undefined;#devicesIdentity:PathIdentity|undefined;#runtimeIdentity:PathIdentity|undefined;
-  constructor(root = fixedRoot(),readonly hooks:LocalRuntimeStateHooks={}) { this.root = root; this.devices = join(root, "devices"); this.runtime = join(root, "runtime"); this.slotPath = join(this.devices, "android-only.json"); }
+  constructor(root = fixedRoot(),readonly hooks:LocalRuntimeStateHooks={},readonly platform:P="android" as P) { this.root = root; this.devices = join(root, "devices"); this.runtime = join(root, "runtime"); this.slotPath = join(this.devices, `${platform}-only.json`); }
   #stage(stage:LocalRuntimeStateStage):Promise<void>{return Promise.resolve(this.hooks.stage?.(stage));}
   async prepare(signal?:AbortSignal): Promise<void> { await secureDirectory(this.root, true,signal);checkCancellation(signal);await secureDirectory(this.devices,true,signal);checkCancellation(signal);await secureDirectory(this.runtime,true,signal);checkCancellation(signal);const root=await directoryIdentity(this.root),devices=await directoryIdentity(this.devices),runtime=await directoryIdentity(this.runtime);if(this.#rootIdentity&&!sameIdentity(root,this.#rootIdentity)||this.#devicesIdentity&&!sameIdentity(devices,this.#devicesIdentity)||this.#runtimeIdentity&&!sameIdentity(runtime,this.#runtimeIdentity))throw new LocalStateFailure("local-state-recovery-required");this.#rootIdentity??=root;this.#devicesIdentity??=devices;this.#runtimeIdentity??=runtime; }
   async openExisting(): Promise<boolean> {
@@ -132,26 +151,28 @@ export class LocalRuntimeState {
     this.#runtimeIdentity ??= runtimeIdentity;
     return true;
   }
-  async readSlot(): Promise<AndroidRuntimeSlot | undefined> { try { return parseSlot(await stableDirectory(this.devices,()=>readPrivateFile(this.slotPath),undefined,this.#devicesIdentity)); } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") return; throw cause; } }
-  async initialize(binding: ResolvedAndroidBinding, now: number,signal?:AbortSignal,hooks:SlotInitializationHooks={}): Promise<Readonly<{ slot: AndroidRuntimeSlot; published: boolean }>> {
-    if (!Number.isSafeInteger(now) || now < 0) throw new LocalStateFailure("local-state-recovery-required");checkCancellation(signal); await this.prepare(signal);checkCancellation(signal); const existing = await this.readSlot();checkCancellation(signal); if (existing) { if (!sameBinding(existing.binding, binding)) throw new LocalStateFailure("device-ambiguous");await this.sweepTemps();checkCancellation(signal); return Object.freeze({ slot: existing, published: false }); }
+  async readSlot(): Promise<RuntimeSlotFor<P> | undefined> { try { return parseSlot(await stableDirectory(this.devices,()=>readPrivateFile(this.slotPath),undefined,this.#devicesIdentity),this.platform) as RuntimeSlotFor<P>; } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") return; throw cause; } }
+  async initialize(binding: P extends "android" ? ResolvedAndroidBinding : undefined, now: number,signal?:AbortSignal,hooks:SlotInitializationHooks={}): Promise<Readonly<{ slot: RuntimeSlotFor<P>; published: boolean }>> {
+    if (this.platform === "android" ? !binding : binding !== undefined) throw new LocalStateFailure("local-state-recovery-required");
+    if (!Number.isSafeInteger(now) || now < 0) throw new LocalStateFailure("local-state-recovery-required");checkCancellation(signal); await this.prepare(signal);checkCancellation(signal); const existing = await this.readSlot();checkCancellation(signal); if (existing) { if (!sameBinding(existing, binding)) throw new LocalStateFailure("device-ambiguous");await this.sweepTemps();checkCancellation(signal); return Object.freeze({ slot: existing, published: false }); }
     for (;;) {
       let temp:string|undefined;
       try {
-        checkCancellation(signal);const credentialBytes=randomBytes(32),credential=credentialBytes.toString("base64url");credentialBytes.fill(0);const slot=freezeSlot({stateVersion:1,revision:1,platform:"android",deviceRef:Object.freeze({contractVersion:2,platform:"android",namespace:"fsq.android.local",opaqueId:randomUUID()}),binding:freezeBinding(binding),control:Object.freeze({port:await candidatePort(),credential}),createdAt:now,updatedAt:now});checkCancellation(signal);temp=join(this.devices,`.android-only.${randomUUID()}.tmp`);await stableDirectory(this.devices,()=>writeExclusive(temp!,Buffer.from(canonicalSlot(slot)),signal,async()=>{await hooks.afterTempWrite?.();await this.#stage("slot-temp-write");},async()=>{await hooks.afterTempSync?.();await this.#stage("slot-file-sync");},()=>this.#stage("slot-file-close")),signal,this.#devicesIdentity);checkCancellation(signal);
+        checkCancellation(signal);const credentialBytes=randomBytes(32),credential=credentialBytes.toString("base64url");credentialBytes.fill(0);const deviceRef=Object.freeze({contractVersion:2 as const,platform:this.platform,namespace:`fsq.${this.platform}.local`,opaqueId:randomUUID()});const base={stateVersion:1 as const,revision:1,deviceRef,control:Object.freeze({port:await candidatePort(),credential}),createdAt:now,updatedAt:now};const slot=(this.platform==="android"?freezeSlot({...base,platform:"android",binding:freezeBinding(binding as ResolvedAndroidBinding)}):freezeSlot({...base,platform:"ios"})) as RuntimeSlotFor<P>;checkCancellation(signal);temp=join(this.devices,`.${this.platform}-only.${randomUUID()}.tmp`);await stableDirectory(this.devices,()=>writeExclusive(temp!,Buffer.from(canonicalSlot(slot)),signal,async()=>{await hooks.afterTempWrite?.();await this.#stage("slot-temp-write");},async()=>{await hooks.afterTempSync?.();await this.#stage("slot-file-sync");},()=>this.#stage("slot-file-close")),signal,this.#devicesIdentity);checkCancellation(signal);
         try{await stableDirectory(this.devices,async()=>{checkCancellation(signal);await (hooks.link??link)(temp!,this.slotPath);await hooks.afterLink?.();await this.#stage("slot-link");await syncDirectory(this.devices);await hooks.afterDirectorySync?.();await this.#stage("slot-directory-sync");},signal,this.#devicesIdentity);await stableDirectory(this.devices,async()=>{if(await safeUnlink(temp!)){await hooks.afterTempUnlink?.();await this.#stage("slot-temp-unlink");}await syncDirectory(this.devices);},undefined,this.#devicesIdentity);temp=undefined;await this.sweepTemps();checkCancellation(signal);return Object.freeze({slot,published:true});}
-        catch(cause){const code=(cause as NodeJS.ErrnoException).code,winner=await this.readSlot();if(winner){if(!sameBinding(winner.binding,binding))throw new LocalStateFailure("device-ambiguous");await this.sweepTemps();checkCancellation(signal);return Object.freeze({slot:winner,published:false});}if(code==="ENOENT")continue;throw cause instanceof LocalStateFailure?cause:new LocalStateFailure("local-state-recovery-required");}
+        catch(cause){const code=(cause as NodeJS.ErrnoException).code,winner=await this.readSlot();if(winner){if(!sameBinding(winner,binding))throw new LocalStateFailure("device-ambiguous");await this.sweepTemps();checkCancellation(signal);return Object.freeze({slot:winner,published:false});}if(code==="ENOENT")continue;throw cause instanceof LocalStateFailure?cause:new LocalStateFailure("local-state-recovery-required");}
       } finally {if(temp)await cleanupTemp(this.devices,temp,this.#devicesIdentity,()=>this.#stage("slot-temp-unlink"));}
     }
   }
-  async sweepTemps(): Promise<void> { await stableDirectory(this.devices,async()=>{for (const name of await readdir(this.devices)) if (TEMP.test(name)) { const path = join(this.devices, name), info = await lstatExisting(path); if (info?.isFile() && !info.isSymbolicLink() && info.uid === effectiveUid() && (info.mode & 0o777) === 0o600&&await safeUnlink(path))await this.#stage("slot-temp-unlink"); } await syncDirectory(this.devices);},undefined,this.#devicesIdentity); }
+  async sweepTemps(): Promise<void> { const pattern=tempPattern(this.platform);await stableDirectory(this.devices,async()=>{for (const name of await readdir(this.devices)) if (pattern.test(name)) { const path = join(this.devices, name), info = await lstatExisting(path); if (info?.isFile() && !info.isSymbolicLink() && info.uid === effectiveUid() && (info.mode & 0o777) === 0o600&&await safeUnlink(path))await this.#stage("slot-temp-unlink"); } await syncDirectory(this.devices);},undefined,this.#devicesIdentity); }
   generationPath(deviceRef: DeviceRef): string { return join(this.runtime, `${deviceRef.opaqueId}.json`); }
-  async readGeneration(slot: AndroidRuntimeSlot): Promise<RuntimeGenerationState | undefined> { try { return parseGeneration(await stableDirectory(this.runtime,()=>readPrivateFile(this.generationPath(slot.deviceRef)),undefined,this.#runtimeIdentity),slot); } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") return; throw cause; } }
+  async readGeneration(slot: RuntimeSlotFor<P>): Promise<RuntimeGenerationState | undefined> { try { return parseGeneration(await stableDirectory(this.runtime,()=>readPrivateFile(this.generationPath(slot.deviceRef)),undefined,this.#runtimeIdentity),slot); } catch (cause) { if ((cause as NodeJS.ErrnoException).code === "ENOENT") return; throw cause; } }
   async publishGeneration(value: RuntimeGenerationState,hooks:GenerationPublicationHooks={}): Promise<void> { await this.prepare(); const final = this.generationPath(value.deviceRef), temp = join(this.runtime, `.${value.deviceRef.opaqueId}.${randomUUID()}.tmp`); await stableDirectory(this.runtime,()=>writeExclusive(temp,Buffer.from(canonicalGeneration(value)),undefined,async()=>{await hooks.afterTempWrite?.();await this.#stage("generation-temp-write");},()=>this.#stage("generation-file-sync"),()=>this.#stage("generation-file-close")),undefined,this.#runtimeIdentity);try { await stableDirectory(this.runtime,async()=>{await rename(temp,final);await hooks.afterRename?.();await this.#stage("generation-rename");await syncDirectory(this.runtime);await hooks.afterDirectorySync?.();await this.#stage("generation-directory-sync");},undefined,this.#runtimeIdentity); await this.sweepGenerationTemps(value.deviceRef); } finally { await cleanupTemp(this.runtime,temp,this.#runtimeIdentity,()=>this.#stage("generation-temp-unlink")); } }
   async deleteGeneration(expected: RuntimeGenerationState,authorityLive=false): Promise<boolean> { const path = this.generationPath(expected.deviceRef);let server:ReturnType<typeof createServer>|undefined;try{if(!authorityLive){server=createServer();await new Promise<void>((resolve,reject)=>{server!.once("error",reject);server!.listen({host:"127.0.0.1",port:expected.port,exclusive:true},resolve);});}const source=await stableDirectory(this.runtime,()=>readPrivateFile(path),undefined,this.#runtimeIdentity);const current=parseGeneration(source,{deviceRef:expected.deviceRef,control:{port:expected.port}}as AndroidRuntimeSlot);if(current.instanceId!==expected.instanceId||current.generation!==expected.generation||current.port!==expected.port||!sameDevice(current.deviceRef,expected.deviceRef))return false;await stableDirectory(this.runtime,async()=>{const latest=await readPrivateFile(path);const verified=parseGeneration(latest,{deviceRef:expected.deviceRef,control:{port:expected.port}}as AndroidRuntimeSlot);if(verified.instanceId!==expected.instanceId||verified.generation!==expected.generation)throw new LocalStateFailure("local-state-recovery-required");await safeUnlink(path);await syncDirectory(this.runtime);},undefined,this.#runtimeIdentity);return true;}catch{return false;}finally{if(server?.listening)await new Promise<void>((resolve)=>server!.close(()=>resolve()));}}
-  async removePartialGeneration(slot: AndroidRuntimeSlot): Promise<boolean> { const path=this.generationPath(slot.deviceRef);let server:ReturnType<typeof createServer>|undefined;try{server=createServer();await new Promise<void>((resolve,reject)=>{server!.once("error",reject);server!.listen({host:"127.0.0.1",port:slot.control.port,exclusive:true},resolve);});return await stableDirectory(this.runtime,async()=>{const before=await lstat(path);if(!before.isFile()||before.isSymbolicLink()||before.uid!==effectiveUid()||(before.mode&0o777)!==0o600)return false;const handle=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);try{const opened=await handle.stat();if(!sameIdentity(opened,before))return false;const current=await lstat(path);if(!sameIdentity(current,opened))return false;await safeUnlink(path);await syncDirectory(this.runtime);return true;}finally{await handle.close();}},undefined,this.#runtimeIdentity);}catch(cause){if((cause as NodeJS.ErrnoException).code==="ENOENT")return true;return false;}finally{if(server?.listening)await new Promise<void>((resolve)=>server!.close(()=>resolve()));}}
+  async removePartialGeneration(slot: RuntimeSlotFor<P>): Promise<boolean> { const path=this.generationPath(slot.deviceRef);let server:ReturnType<typeof createServer>|undefined;try{server=createServer();await new Promise<void>((resolve,reject)=>{server!.once("error",reject);server!.listen({host:"127.0.0.1",port:slot.control.port,exclusive:true},resolve);});return await stableDirectory(this.runtime,async()=>{const before=await lstat(path);if(!before.isFile()||before.isSymbolicLink()||before.uid!==effectiveUid()||(before.mode&0o777)!==0o600)return false;const handle=await open(path,constants.O_RDONLY|constants.O_NOFOLLOW);try{const opened=await handle.stat();if(!sameIdentity(opened,before))return false;const current=await lstat(path);if(!sameIdentity(current,opened))return false;await safeUnlink(path);await syncDirectory(this.runtime);return true;}finally{await handle.close();}},undefined,this.#runtimeIdentity);}catch(cause){if((cause as NodeJS.ErrnoException).code==="ENOENT")return true;return false;}finally{if(server?.listening)await new Promise<void>((resolve)=>server!.close(()=>resolve()));}}
   async sweepGenerationTemps(deviceRef: DeviceRef): Promise<void> { const pattern = new RegExp(`^\\.${deviceRef.opaqueId}\\.[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.tmp$`); await stableDirectory(this.runtime,async()=>{for (const name of await readdir(this.runtime)) if (pattern.test(name)) { const path = join(this.runtime, name), info = await lstatExisting(path); if (info?.isFile() && !info.isSymbolicLink() && info.uid === effectiveUid() && (info.mode & 0o777) === 0o600&&await safeUnlink(path))await this.#stage("generation-temp-unlink"); } await syncDirectory(this.runtime);},undefined,this.#runtimeIdentity); }
   async replaceSlot(expected: AndroidRuntimeSlot, expectedGeneration: RuntimeGenerationState | undefined, binding: ResolvedAndroidBinding, deviceRef: DeviceRef, now: number, signal?: AbortSignal): Promise<Readonly<{ previous: AndroidRuntimeSlot; slot: AndroidRuntimeSlot }>> {
+    if (this.platform !== "android") throw new LocalStateFailure("local-state-recovery-required");
     if (!Number.isSafeInteger(now) || now < expected.createdAt || expected.revision >= Number.MAX_SAFE_INTEGER) throw new LocalStateFailure("local-state-recovery-required");
     let checkedDevice: DeviceRef;
     try { checkedDevice = validateDeviceRef(deviceRef); } catch { throw new LocalStateFailure("local-state-recovery-required"); }
@@ -159,7 +180,7 @@ export class LocalRuntimeState {
     checkCancellation(signal);
     await this.prepare(signal);
     const source = canonicalSlot(expected), current = await this.readSlot();
-    if (!current || canonicalSlot(current) !== source) throw new LocalStateFailure("instance-conflict");
+    if (!current || current.platform !== "android" || canonicalSlot(current) !== source) throw new LocalStateFailure("instance-conflict");
     let oldPort: ReturnType<typeof createServer> | undefined, freshPort: PortReservation | undefined, temp: string | undefined, committed = false;
     try {
       oldPort = createServer();
@@ -169,8 +190,8 @@ export class LocalRuntimeState {
       freshPort = await reservePort(expected.control.port);
       checkCancellation(signal);
       const compared = await this.readSlot();
-      if (!compared || canonicalSlot(compared) !== source) throw new LocalStateFailure("instance-conflict");
-      const generation = await this.readGeneration(expected);
+      if (!compared || compared.platform !== "android" || canonicalSlot(compared) !== source) throw new LocalStateFailure("instance-conflict");
+      const generation = await (this as unknown as LocalRuntimeState<"android">).readGeneration(expected);
       if ((!generation) !== (!expectedGeneration) || generation && expectedGeneration && canonicalGeneration(generation) !== canonicalGeneration(expectedGeneration)) throw new LocalStateFailure("instance-conflict");
       if (generation && expectedGeneration) {
         const generationPath = this.generationPath(expected.deviceRef), generationSource = canonicalGeneration(expectedGeneration);
@@ -184,7 +205,7 @@ export class LocalRuntimeState {
       await this.sweepGenerationTemps(expected.deviceRef);
       checkCancellation(signal);
       const credentialBytes = randomBytes(32), credential = credentialBytes.toString("base64url"); credentialBytes.fill(0);
-      const slot = freezeSlot({ stateVersion: 1, revision: expected.revision + 1, platform: "android", deviceRef: checkedDevice, binding: freezeBinding(binding), control: Object.freeze({ port: freshPort.port, credential }), createdAt: expected.createdAt, updatedAt: now });
+      const slot = freezeSlot({ stateVersion: 1, revision: expected.revision + 1, platform: "android", deviceRef: checkedDevice, binding: freezeBinding(binding), control: Object.freeze({ port: freshPort.port, credential }), createdAt: expected.createdAt, updatedAt: now }) as AndroidRuntimeSlot;
       temp = join(this.devices, `.android-only.${randomUUID()}.tmp`);
       await stableDirectory(this.devices, () => writeExclusive(temp!, Buffer.from(canonicalSlot(slot)), signal, () => this.#stage("replacement-temp-write"), () => this.#stage("replacement-file-sync"), () => this.#stage("replacement-file-close")), signal, this.#devicesIdentity);
       checkCancellation(signal);
@@ -204,7 +225,7 @@ export class LocalRuntimeState {
     } catch (cause) {
       if (committed) {
         const applied = await this.readSlot();
-        if (applied && applied.revision === expected.revision + 1) { await syncDirectory(this.devices); await this.sweepTemps(); return Object.freeze({ previous: expected, slot: applied }); }
+        if (applied?.platform === "android" && applied.revision === expected.revision + 1) { await syncDirectory(this.devices); await this.sweepTemps(); return Object.freeze({ previous: expected, slot: applied as AndroidRuntimeSlot }); }
       }
       throw cause instanceof LocalStateFailure ? cause : new LocalStateFailure("local-state-recovery-required");
     } finally {
@@ -215,7 +236,9 @@ export class LocalRuntimeState {
   }
 }
 
-export async function resolveAutomaticSlot(signal?: AbortSignal): Promise<Readonly<{ state: LocalRuntimeState; slot: AndroidRuntimeSlot; published: boolean }>> {
-  const state = new LocalRuntimeState(); await state.prepare(signal);checkCancellation(signal); const resolved = await resolveSingleAndroidBinding(signal ? { signal } : undefined); if (!resolved.ok) throw resolved.error;checkCancellation(signal); const binding = revealAndroidBinding(resolved.value.access), result = await state.initialize(binding, Date.now(),signal); return Object.freeze({ state, ...result });
+export async function resolveAutomaticSlot(platform: RuntimePlatform, signal?: AbortSignal): Promise<Readonly<{ state: LocalRuntimeState<RuntimePlatform>; slot: RuntimeSlot; published: boolean }>> {
+  const state = new LocalRuntimeState(undefined, {}, platform); await state.prepare(signal);checkCancellation(signal);
+  if (platform === "ios") return Object.freeze({ state, ...await state.initialize(undefined, Date.now(), signal) });
+  const resolved = await resolveSingleAndroidBinding(signal ? { signal } : undefined); if (!resolved.ok) throw resolved.error;checkCancellation(signal); const binding = revealAndroidBinding(resolved.value.access), result = await state.initialize(binding, Date.now(),signal); return Object.freeze({ state, ...result });
 }
 export const controlStateInternals = Object.freeze({ fixedRoot, canonicalSlot, canonicalGeneration, parseSlot, parseGeneration, candidatePort, reservePort });

@@ -23,6 +23,8 @@ import {
   LocalStateFailure,
   type AndroidRuntimeSlot,
   type RuntimeGenerationState,
+  type RuntimePlatform,
+  type RuntimeSlot,
 } from "./control-state.js";
 import { helloControl, OwnerHttpControl, type RuntimeOwnerControl } from "./control.js";
 
@@ -35,9 +37,9 @@ export type RuntimeLiveError = Readonly<{
 export type OwnerMaintenanceError = ControlError | RuntimeLiveError;
 export type OwnerLocalResult<T> = Readonly<{ ok: true; value: T }> | Readonly<{ ok: false; error: OwnerMaintenanceError }>;
 export type LocalStateStatusValue =
-  | Readonly<{ platform: "android"; state: "uninitialized" }>
+  | Readonly<{ platform: RuntimePlatform; state: "uninitialized" }>
   | Readonly<{
-      platform: "android";
+      platform: RuntimePlatform;
       state: "ready";
       deviceRef: DeviceRef;
       stateRevision: number;
@@ -58,7 +60,7 @@ export type RebindDeviceValue = Readonly<{
 }>;
 
 export interface RuntimeOwnerLocal extends AsyncDisposable {
-  inspectLocalState(input: Readonly<{ platform: "android" }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<LocalStateStatusValue>>;
+  inspectLocalState(input: Readonly<{ platform: RuntimePlatform }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<LocalStateStatusValue>>;
   shutdownRuntime(input: Readonly<{ deviceRef: DeviceRef }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<ControlResult<ShutdownRuntimeValue>>;
   resetControlState(input: Readonly<{ platform: "android"; expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<ResetControlStateValue>>;
   rebindDevice(input: Readonly<{ platform: "android"; expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, options?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<RebindDeviceValue>>;
@@ -101,8 +103,9 @@ function options(value: unknown): Readonly<{ signal?: AbortSignal }> | undefined
   if (!exact(value, keys) || (Object.hasOwn(value, "signal") && !(value.signal instanceof AbortSignal))) throw new TypeError("Invalid owner-local options");
   return value as Readonly<{ signal?: AbortSignal }>;
 }
-function platformInput(value: unknown): void {
-  if (!exact(value, ["platform"]) || value.platform !== "android") throw new TypeError("Invalid owner-local input");
+function platformInput(value: unknown): RuntimePlatform {
+  if (!exact(value, ["platform"]) || value.platform !== "android" && value.platform !== "ios") throw new TypeError("Invalid owner-local input");
+  return value.platform;
 }
 function expectedInput(value: unknown): Readonly<{ expectedDeviceRef: DeviceRef; expectedStateRevision: number }> {
   if (!exact(value, ["platform", "expectedDeviceRef", "expectedStateRevision"]) || value.platform !== "android" || !positiveRevision(value.expectedStateRevision)) throw new TypeError("Invalid owner-local input");
@@ -112,9 +115,7 @@ function expectedInput(value: unknown): Readonly<{ expectedDeviceRef: DeviceRef;
 }
 function deviceInput(value: unknown): DeviceRef {
   if (!exact(value, ["deviceRef"])) throw new TypeError("Invalid owner-local input");
-  const deviceRef = validateDeviceRef(value.deviceRef);
-  if (deviceRef.platform !== "android") throw new TypeError("Invalid owner-local input");
-  return deviceRef;
+  return validateDeviceRef(value.deviceRef);
 }
 function maintenanceError(value: unknown): OwnerMaintenanceError {
   try { const error = validateControlError(value); return controlError(error.code); } catch { /* try local error */ }
@@ -127,15 +128,15 @@ function result<T>(value: unknown, validateValue: (input: unknown) => T): OwnerL
   throw new TypeError("Invalid owner-local result");
 }
 function statusValue(value: unknown): LocalStateStatusValue {
-  if (exact(value, ["platform", "state"]) && value.platform === "android" && value.state === "uninitialized") return Object.freeze({ platform: "android", state: "uninitialized" });
-  if (!exact(value, ["platform", "state", "deviceRef", "stateRevision", "runtime"]) || value.platform !== "android" || value.state !== "ready" || !positiveRevision(value.stateRevision)) throw new TypeError("Invalid owner-local status");
+  if (exact(value, ["platform", "state"]) && (value.platform === "android" || value.platform === "ios") && value.state === "uninitialized") return Object.freeze({ platform: value.platform, state: "uninitialized" });
+  if (!exact(value, ["platform", "state", "deviceRef", "stateRevision", "runtime"]) || value.platform !== "android" && value.platform !== "ios" || value.state !== "ready" || !positiveRevision(value.stateRevision)) throw new TypeError("Invalid owner-local status");
   const deviceRef = validateDeviceRef(value.deviceRef);
-  if (deviceRef.platform !== "android") throw new TypeError("Invalid owner-local status");
+  if (deviceRef.platform !== value.platform) throw new TypeError("Invalid owner-local status");
   let runtime: Extract<LocalStateStatusValue, { state: "ready" }>["runtime"];
   if (exact(value.runtime, ["state"]) && value.runtime.state === "not-running") runtime = Object.freeze({ state: "not-running" });
   else if (exact(value.runtime, ["state", "target"]) && value.runtime.state === "live") runtime = Object.freeze({ state: "live", target: cloneTarget(validateRuntimeTarget(value.runtime.target)) });
   else throw new TypeError("Invalid owner-local status");
-  return Object.freeze({ platform: "android", state: "ready", deviceRef: cloneDevice(deviceRef), stateRevision: value.stateRevision, runtime });
+  return Object.freeze({ platform: value.platform, state: "ready", deviceRef: cloneDevice(deviceRef), stateRevision: value.stateRevision, runtime });
 }
 function resetValue(value: unknown): ResetControlStateValue {
   if (!exact(value, ["platform", "deviceRef", "previousStateRevision", "stateRevision"]) || value.platform !== "android" || !positiveRevision(value.previousStateRevision) || value.stateRevision !== value.previousStateRevision + 1) throw new TypeError("Invalid owner-local reset result");
@@ -155,17 +156,17 @@ export const validateResetControlStateResult = (value: unknown): OwnerLocalResul
 export const validateRebindDeviceResult = (value: unknown): OwnerLocalResult<RebindDeviceValue> => result(value, rebindValue);
 
 interface OwnerDependencies {
-  readonly state: () => LocalRuntimeState;
+  readonly state: (platform: RuntimePlatform) => LocalRuntimeState<RuntimePlatform>;
   readonly hello: typeof helloControl;
-  readonly owner: (slot: AndroidRuntimeSlot, target: RuntimeTarget) => RuntimeOwnerControl;
+  readonly owner: (slot: RuntimeSlot, target: RuntimeTarget) => RuntimeOwnerControl;
   readonly resolveBinding: (signal?: AbortSignal) => Promise<ResolvedAndroidBinding>;
   readonly now: () => number;
   readonly uuid: () => string;
 }
 const dependencies: OwnerDependencies = Object.freeze({
-  state: () => new LocalRuntimeState(),
+  state: (platform: RuntimePlatform) => new LocalRuntimeState(undefined, {}, platform),
   hello: helloControl,
-  owner: (slot: AndroidRuntimeSlot, target: RuntimeTarget) => new OwnerHttpControl(slot.control.port, target, slot.control.credential),
+  owner: (slot: RuntimeSlot, target: RuntimeTarget) => new OwnerHttpControl(slot.control.port, target, slot.control.credential),
   resolveBinding: async (signal?: AbortSignal) => {
     const resolved = await resolveSingleAndroidBinding(signal ? { signal } : undefined);
     if (!resolved.ok) throw resolved.error;
@@ -181,19 +182,19 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
   readonly #controls = new Set<RuntimeOwnerControl>();
   constructor(configured: OwnerDependencies) { this.#dependencies = configured; }
 
-  async inspectLocalState(input: Readonly<{ platform: "android" }>, configured?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<LocalStateStatusValue>> {
+  async inspectLocalState(input: Readonly<{ platform: RuntimePlatform }>, configured?: Readonly<{ signal?: AbortSignal }>): Promise<OwnerLocalResult<LocalStateStatusValue>> {
     try {
-      platformInput(input); const checked = options(configured);
+      const platform = platformInput(input), checked = options(configured);
       if (this.#closed) return failure("runtime-exited");
       if (checked?.signal?.aborted) return failure("request-cancelled");
-      const state = this.#dependencies.state();
-      if (!await state.openExisting()) return validateLocalStateStatusResult(ok(Object.freeze({ platform: "android", state: "uninitialized" as const })));
+      const state = this.#dependencies.state(platform);
+      if (!await state.openExisting()) return validateLocalStateStatusResult(ok(Object.freeze({ platform, state: "uninitialized" as const })));
       const slot = await state.readSlot();
-      if (!slot) return validateLocalStateStatusResult(ok(Object.freeze({ platform: "android", state: "uninitialized" as const })));
+      if (!slot) return validateLocalStateStatusResult(ok(Object.freeze({ platform, state: "uninitialized" as const })));
       const live = await this.#authority(state, slot, checked?.signal);
       if (live.kind === "error") return validateLocalStateStatusResult(failure(live.code));
       const runtime = live.kind === "absent" ? Object.freeze({ state: "not-running" as const }) : Object.freeze({ state: "live" as const, target: live.target });
-      return validateLocalStateStatusResult(ok(Object.freeze({ platform: "android" as const, state: "ready" as const, deviceRef: slot.deviceRef, stateRevision: slot.revision, runtime })));
+      return validateLocalStateStatusResult(ok(Object.freeze({ platform, state: "ready" as const, deviceRef: slot.deviceRef, stateRevision: slot.revision, runtime })));
     } catch (cause) { return validateLocalStateStatusResult(failure(this.#map(cause))); }
   }
 
@@ -216,7 +217,7 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
       const expected = expectedInput(input), checked = options(configured);
       if (this.#closed) return validateResetControlStateResult(failure("runtime-exited"));
       if (checked?.signal?.aborted) return validateResetControlStateResult(failure("request-cancelled"));
-      const state = this.#dependencies.state(), slot = await this.#maintenanceSlot(state, expected, checked?.signal);
+      const state = this.#dependencies.state("android") as LocalRuntimeState<"android">, slot = await this.#maintenanceSlot(state, expected, checked?.signal);
       if ("result" in slot) return validateResetControlStateResult(slot.result);
       const replaced = await state.replaceSlot(slot.slot, slot.generation, slot.slot.binding, slot.slot.deviceRef, this.#dependencies.now(), checked?.signal);
       return validateResetControlStateResult(ok(Object.freeze({ platform: "android" as const, deviceRef: replaced.slot.deviceRef, previousStateRevision: replaced.previous.revision, stateRevision: replaced.slot.revision })));
@@ -230,7 +231,7 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
       if (checked?.signal?.aborted) return validateRebindDeviceResult(failure("request-cancelled"));
       const binding = await this.#dependencies.resolveBinding(checked?.signal);
       if (checked?.signal?.aborted) return validateRebindDeviceResult(failure("request-cancelled"));
-      const state = this.#dependencies.state(), slot = await this.#maintenanceSlot(state, expected, checked?.signal);
+      const state = this.#dependencies.state("android") as LocalRuntimeState<"android">, slot = await this.#maintenanceSlot(state, expected, checked?.signal);
       if ("result" in slot) return validateRebindDeviceResult(slot.result);
       let opaqueId = "";
       for (let attempt = 0; attempt < 32 && (!opaqueId || opaqueId === slot.slot.deviceRef.opaqueId); attempt++) opaqueId = this.#dependencies.uuid();
@@ -250,7 +251,7 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
   }
   [Symbol.asyncDispose](): Promise<void> { return this.close(); }
 
-  async #authority(state: LocalRuntimeState, slot: AndroidRuntimeSlot, signal?: AbortSignal): Promise<Readonly<{ kind: "live"; target: RuntimeTarget }> | Readonly<{ kind: "absent"; generation: RuntimeGenerationState | undefined }> | Readonly<{ kind: "error"; code: ControlErrorCode }>> {
+  async #authority(state: LocalRuntimeState<RuntimePlatform>, slot: RuntimeSlot, signal?: AbortSignal): Promise<Readonly<{ kind: "live"; target: RuntimeTarget }> | Readonly<{ kind: "absent"; generation: RuntimeGenerationState | undefined }> | Readonly<{ kind: "error"; code: ControlErrorCode }>> {
     let generation: RuntimeGenerationState | undefined;
     try { generation = await state.readGeneration(slot); } catch { return Object.freeze({ kind: "error", code: "local-state-recovery-required" }); }
     const expected = generation ? Object.freeze({ instanceId: generation.instanceId, generation: generation.generation }) : null;
@@ -260,8 +261,8 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
     if (answer.error.code === "request-cancelled") return Object.freeze({ kind: "error", code: "request-cancelled" });
     return Object.freeze({ kind: "error", code: "local-state-recovery-required" });
   }
-  async #current(deviceRef: DeviceRef, signal?: AbortSignal): Promise<Readonly<{ ok: true; state: LocalRuntimeState; slot: AndroidRuntimeSlot; target: RuntimeTarget }> | Readonly<{ ok: false; result: Readonly<{ ok: false; error: ControlError }> }>> {
-    const state = this.#dependencies.state();
+  async #current(deviceRef: DeviceRef, signal?: AbortSignal): Promise<Readonly<{ ok: true; state: LocalRuntimeState<RuntimePlatform>; slot: RuntimeSlot; target: RuntimeTarget }> | Readonly<{ ok: false; result: Readonly<{ ok: false; error: ControlError }> }>> {
+    const state = this.#dependencies.state(deviceRef.platform);
     if (!await state.openExisting()) return Object.freeze({ ok: false, result: failure("instance-not-found") });
     const slot = await state.readSlot();
     if (!slot) return Object.freeze({ ok: false, result: failure("instance-not-found") });
@@ -273,10 +274,10 @@ class RuntimeOwnerLocalImpl implements RuntimeOwnerLocal {
     if (!latest || latest.revision !== slot.revision || !sameDevice(latest.deviceRef, slot.deviceRef) || latest.control.port !== slot.control.port || latest.control.credential !== slot.control.credential) return Object.freeze({ ok: false, result: failure("instance-conflict") });
     return Object.freeze({ ok: true, state, slot: latest, target: authority.target });
   }
-  async #maintenanceSlot(state: LocalRuntimeState, expected: Readonly<{ expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, signal?: AbortSignal): Promise<Readonly<{ slot: AndroidRuntimeSlot; generation: RuntimeGenerationState | undefined }> | Readonly<{ result: OwnerLocalResult<never> }>> {
+  async #maintenanceSlot(state: LocalRuntimeState<"android">, expected: Readonly<{ expectedDeviceRef: DeviceRef; expectedStateRevision: number }>, signal?: AbortSignal): Promise<Readonly<{ slot: AndroidRuntimeSlot; generation: RuntimeGenerationState | undefined }> | Readonly<{ result: OwnerLocalResult<never> }>> {
     if (!await state.openExisting()) return Object.freeze({ result: failure("instance-not-found") });
     const slot = await state.readSlot();
-    if (!slot) return Object.freeze({ result: failure("instance-not-found") });
+    if (!slot || slot.platform !== "android") return Object.freeze({ result: failure("instance-not-found") });
     if (!sameDevice(slot.deviceRef, expected.expectedDeviceRef) || slot.revision !== expected.expectedStateRevision) return Object.freeze({ result: failure("instance-conflict") });
     const authority = await this.#authority(state, slot, signal);
     if (authority.kind === "live") return Object.freeze({ result: ownerFailure(RUNTIME_LIVE) });

@@ -13,7 +13,7 @@ import {
   type RuntimeTarget,
   type ShutdownRuntimeValue,
 } from "../../contracts/src/index.js";
-import { LocalRuntimeState, controlStateInternals, type AndroidRuntimeSlot, type LocalRuntimeStateStage, type RuntimeGenerationState } from "../src/control-state.js";
+import { LocalRuntimeState, controlStateInternals, type AndroidRuntimeSlot, type LocalRuntimeStateStage, type RuntimeGenerationState, type RuntimeSlot } from "../src/control-state.js";
 import {
   createRuntimeOwnerLocal,
   ownerTestInternals,
@@ -45,10 +45,10 @@ async function fixture(initialized = true, stage?: (value: LocalRuntimeStateStag
 function generation(slot: AndroidRuntimeSlot): RuntimeGenerationState {
   return Object.freeze({ runtimeStateVersion: 1, deviceRef: slot.deviceRef, instanceId: randomUUID(), generation: randomUUID(), port: slot.control.port, createdAt: NOW + 1, ready: true });
 }
-function live(slot: AndroidRuntimeSlot, target: RuntimeTarget) {
+function live(slot: RuntimeSlot, target: RuntimeTarget) {
   return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) }) }) });
 }
-function fakeOwner(target: RuntimeTarget, _slot: AndroidRuntimeSlot, calls: unknown[]) {
+function fakeOwner(target: RuntimeTarget, _slot: RuntimeSlot, calls: unknown[]) {
   let closed = false;
   return {
     async shutdownRuntime(input: RuntimeTarget): Promise<ControlResult<ShutdownRuntimeValue>> {
@@ -61,11 +61,11 @@ function fakeOwner(target: RuntimeTarget, _slot: AndroidRuntimeSlot, calls: unkn
   };
 }
 function ownerFor(state: LocalRuntimeState, configured: {
-  hello?: (slot: AndroidRuntimeSlot, expected: RuntimeTarget | null, signal?: AbortSignal) => Promise<ReturnType<typeof live> | Readonly<{ ok: false; error: ReturnType<typeof controlError> }>>;
+  hello?: (slot: RuntimeSlot, expected: RuntimeTarget | null, signal?: AbortSignal) => Promise<ReturnType<typeof live> | Readonly<{ ok: false; error: ReturnType<typeof controlError> }>>;
   resolveBinding?: (signal?: AbortSignal) => Promise<AndroidRuntimeSlot["binding"]>;
   now?: () => number;
   uuid?: () => string;
-  owner?: (slot: AndroidRuntimeSlot, target: RuntimeTarget) => ReturnType<typeof fakeOwner>;
+  owner?: (slot: RuntimeSlot, target: RuntimeTarget) => ReturnType<typeof fakeOwner>;
 } = {}): RuntimeOwnerLocal {
   return ownerTestInternals.create({
     state: () => state,
@@ -169,6 +169,8 @@ await test("owner operations fence a slot replacement between hello and route di
   const f = await fixture(), slot = f.slot!, target = Object.freeze({ instanceId: randomUUID(), generation: randomUUID() }); let routes = 0, replaced = false;
   const owner = ownerFor(f.state, {
     hello: async (candidate) => {
+      assert.equal(candidate.platform, "android");
+      if (candidate.platform !== "android") throw new Error("unexpected platform");
       if (!replaced) { replaced = true; await f.state.replaceSlot(candidate, undefined, candidate.binding, candidate.deviceRef, candidate.createdAt + 1); }
       return live(candidate, target);
     },
@@ -315,6 +317,20 @@ await test("owner-local validators reject extras and freeze exact safe DTOs", ()
   assert.equal(failed.ok ? "" : failed.error.code, "instance-conflict");
 });
 
+await test("owner-local validates and reports iOS state without provider details", async () => {
+  const made = await mkdtemp(join(tmpdir(), "fsq-owner-ios-")), parent = await realpath(made); await chmod(parent, 0o700);
+  const state = new LocalRuntimeState(join(parent, "state"), {}, "ios"), slot = (await state.initialize(undefined, NOW)).slot;
+  const owner = ownerTestInternals.create({ state: () => state as LocalRuntimeState<"android" | "ios"> });
+  try {
+    const status = await owner.inspectLocalState({ platform: "ios" });
+    assert.deepEqual(status, { ok: true, value: { platform: "ios", state: "ready", deviceRef: slot.deviceRef, stateRevision: 1, runtime: { state: "not-running" } } });
+    const serialized = JSON.stringify(status);
+    assert.equal(serialized.includes("endpoint"), false);
+    assert.equal(serialized.includes("provider"), false);
+    assert.throws(() => validateLocalStateStatusResult({ ok: true, value: { platform: "ios", state: "ready", deviceRef: { ...slot.deviceRef, platform: "android" }, stateRevision: 1, runtime: { state: "not-running" } } }));
+  } finally { await owner.close(); await rm(parent, { recursive: true, force: true }); }
+});
+
 await test("invalid local shapes fail before state, resolver, or owner I/O", async () => {
   const f = await fixture(); let io = 0;
   const owner = ownerTestInternals.create({
@@ -323,7 +339,7 @@ await test("invalid local shapes fail before state, resolver, or owner I/O", asy
   });
   try {
     for (const result of [
-      await owner.inspectLocalState({ platform: "ios" } as never),
+      await owner.inspectLocalState({ platform: "windows" } as never),
       await owner.resetControlState({ platform: "android", expectedDeviceRef: f.slot!.deviceRef, expectedStateRevision: 0 }),
       await owner.rebindDevice({ platform: "android", expectedDeviceRef: f.slot!.deviceRef, expectedStateRevision: 1 }, { signal: {} as AbortSignal }),
     ]) assert.equal(result.ok ? "" : result.error.code, "malformed-control");

@@ -72,17 +72,26 @@ async function withOwner<T>(runtime: CliRuntimeDependencies, operation: (owner: 
   finally { await owner.close().catch(() => undefined); }
 }
 
-async function lookup(owner: RuntimeOwnerLocal, opaqueId: string | undefined, signal?: AbortSignal): Promise<Readonly<{ ok: true; value: Extract<LocalStateStatusValue, { state: "ready" }> }> | Failure> {
-  const status = validateLocalStateStatusResult(await owner.inspectLocalState({ platform: "android" }, signal ? { signal } : undefined));
-  if (!status.ok) return status;
-  if (status.value.state === "uninitialized") return failure("instance-not-found");
-  if (opaqueId !== undefined && status.value.deviceRef.opaqueId !== opaqueId) return failure("instance-conflict");
-  return freeze({ ok: true, value: status.value });
+async function lookup(owner: RuntimeOwnerLocal, opaqueId: string | undefined, signal?: AbortSignal, platform?: "android" | "ios"): Promise<Readonly<{ ok: true; value: Extract<LocalStateStatusValue, { state: "ready" }> }> | Failure> {
+  const statuses: Extract<LocalStateStatusValue, { state: "ready" }>[] = [];
+  for (const candidate of platform ? [platform] : ["android", "ios"] as const) {
+    const status = validateLocalStateStatusResult(await owner.inspectLocalState({ platform: candidate }, signal ? { signal } : undefined));
+    if (!status.ok) return status;
+    if (status.value.state === "ready") statuses.push(status.value);
+  }
+  if (opaqueId !== undefined) {
+    const matching = statuses.filter((status) => status.deviceRef.opaqueId === opaqueId);
+    if (matching.length === 1) return freeze({ ok: true, value: matching[0]! });
+    return failure(statuses.length === 0 ? "instance-not-found" : matching.length > 1 ? "device-ambiguous" : "instance-conflict");
+  }
+  const live = statuses.filter((status) => status.runtime.state === "live"), candidates = live.length > 0 ? live : statuses;
+  if (candidates.length !== 1) return failure(candidates.length === 0 ? "instance-not-found" : "device-ambiguous");
+  return freeze({ ok: true, value: candidates[0]! });
 }
 
 async function ensure(command: Extract<CliCommand, { path: "viewer ensure" }>, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
   const agent = createAgentControl({ acquireRuntime: runtime.acquireRuntime }), options = signal ? { signal } : undefined;
-  if (command.platform) return agent.ensure({ selector: { kind: "auto", platform: "android" } }, options);
+  if (command.platform) return agent.ensure({ selector: { kind: "auto", platform: command.platform } }, options);
   return withOwner(runtime, async (owner) => {
     const found = await lookup(owner, command.deviceRef, signal);
     return found.ok ? agent.ensure({ selector: { kind: "known", deviceRef: found.value.deviceRef } }, options) : found;
@@ -155,7 +164,7 @@ function maintenanceValue(status: Extract<LocalStateStatusValue, { state: "ready
 }
 async function maintenance(command: Extract<CliCommand, { path: "local-state reset-control" | "local-state rebind-device" }>, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
   return withOwner(runtime, async (owner) => {
-    const found = await lookup(owner, command.deviceRef, signal);
+    const found = await lookup(owner, command.deviceRef, signal, "android");
     if (!found.ok) return found;
     const status = found.value;
     if (status.runtime.state === "live") return runtimeLive();
@@ -184,7 +193,7 @@ async function maintenance(command: Extract<CliCommand, { path: "local-state res
 
 async function dispatch(command: Exclude<CliCommand, { path: "stream wait" | "stream watch" }>, io: CliIo, runtime: CliRuntimeDependencies, signal?: AbortSignal): Promise<Result> {
   if (command.path === "viewer ensure") return ensure(command, runtime, signal);
-  if (command.path === "local-state status") return withOwner(runtime, async (owner) => validateLocalStateStatusResult(await owner.inspectLocalState({ platform: "android" }, signal ? { signal } : undefined)));
+  if (command.path === "local-state status") return withOwner(runtime, async (owner) => validateLocalStateStatusResult(await owner.inspectLocalState({ platform: command.platform }, signal ? { signal } : undefined)));
   if (command.path === "local-state reset-control" || command.path === "local-state rebind-device") return maintenance(command, io, runtime, signal);
   return storedCommand(command, runtime, signal);
 }

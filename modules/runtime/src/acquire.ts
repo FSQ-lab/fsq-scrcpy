@@ -9,7 +9,7 @@ import {
   type RuntimeInstance,
   type RuntimeTarget,
 } from "../../contracts/src/index.js";
-import { LocalRuntimeState, LocalStateFailure, resolveAutomaticSlot, type AndroidRuntimeSlot, type RuntimeGenerationState } from "./control-state.js";
+import { LocalRuntimeState, LocalStateFailure, resolveAutomaticSlot, type RuntimeSlot, type RuntimeGenerationState } from "./control-state.js";
 import { CONTROL_DEADLINES, attachControlSession, helloControl, type AcquireRuntimeLocalResult } from "./control.js";
 
 export interface AcquireRuntimeOptions { readonly signal?: AbortSignal }
@@ -17,13 +17,13 @@ interface BootstrapFrame { readonly type: "candidate" | "contended" | "ready" | 
 const frozen = <T extends object>(value: T): Readonly<T> => Object.freeze(value);
 const sendFrame=(child:ChildProcess,frame:BootstrapFrame):Promise<boolean>=>new Promise((resolve)=>{if(!child.connected){resolve(false);return;}child.send(frame,(cause)=>resolve(!cause));});
 const failure = (code: ControlError["code"]): Readonly<{ ok: false; error: ControlError }> => frozen({ ok: false, error: controlError(code) });
-const sameDevice = (a: AndroidRuntimeSlot["deviceRef"], b: AndroidRuntimeSlot["deviceRef"]): boolean => a.contractVersion === b.contractVersion && a.platform === b.platform && a.namespace === b.namespace && a.opaqueId === b.opaqueId;
-const sameAuthority = (a: AndroidRuntimeSlot, b: AndroidRuntimeSlot): boolean => a.revision === b.revision && sameDevice(a.deviceRef, b.deviceRef) && a.control.port === b.control.port && a.control.credential === b.control.credential;
+const sameDevice = (a: RuntimeSlot["deviceRef"], b: RuntimeSlot["deviceRef"]): boolean => a.contractVersion === b.contractVersion && a.platform === b.platform && a.namespace === b.namespace && a.opaqueId === b.opaqueId;
+const sameAuthority = (a: RuntimeSlot, b: RuntimeSlot): boolean => a.revision === b.revision && sameDevice(a.deviceRef, b.deviceRef) && a.control.port === b.control.port && a.control.credential === b.control.credential;
 function options(value: unknown): AcquireRuntimeOptions { if (value === undefined) return frozen({}); if (typeof value !== "object" || value === null || Object.getPrototypeOf(value) !== Object.prototype || Reflect.ownKeys(value).some((key) => key !== "signal") || (Object.hasOwn(value, "signal") && !((value as AcquireRuntimeOptions).signal instanceof AbortSignal))) throw new TypeError("Invalid Runtime acquire options"); return value as AcquireRuntimeOptions; }
 function mapFailure(cause: unknown): ControlError["code"] { if (cause instanceof LocalStateFailure) return cause.code; if (typeof cause === "object" && cause !== null && "code" in cause && typeof cause.code === "string" && ["dependency-unavailable", "adb-incompatible", "device-not-found", "device-ambiguous", "device-unavailable", "artifact-unavailable", "artifact-mismatch"].includes(cause.code)) return cause.code as ControlError["code"]; return "local-state-recovery-required"; }
 function attachment(disposition: "started" | "attached", instance: RuntimeInstance): RuntimeAttachment { return frozen({ disposition, instance }); }
 interface StartDependencies {
-  readonly spawn: (slot: AndroidRuntimeSlot) => ChildProcess;
+  readonly spawn: (slot: RuntimeSlot) => ChildProcess;
   readonly bootstrap: typeof waitBootstrap;
   readonly hello: typeof helloControl;
   readonly attach: typeof attach;
@@ -31,23 +31,23 @@ interface StartDependencies {
   readonly sleep: (milliseconds: number) => Promise<void>;
 }
 const startDependencies: StartDependencies = Object.freeze({
-  spawn: (slot: AndroidRuntimeSlot) => fork(fileURLToPath(new URL("./control-child.js", import.meta.url)), [JSON.stringify(slot.deviceRef)], { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], env: {}, execArgv: [] }),
+  spawn: (slot: RuntimeSlot) => fork(fileURLToPath(new URL("./control-child.js", import.meta.url)), [JSON.stringify(slot.deviceRef)], { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"], env: {}, execArgv: [] }),
   bootstrap: waitBootstrap,
   hello: helloControl,
   attach,
   now: () => performance.now(),
   sleep: (milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
 });
-async function slotFor(request: AcquireRuntimeRequest, signal?: AbortSignal): Promise<Readonly<{ state: LocalRuntimeState; slot: AndroidRuntimeSlot }>> {
-  if (request.selector.kind === "auto") { const result = await resolveAutomaticSlot(signal); return frozen({ state: result.state, slot: result.slot }); }
-  const state = new LocalRuntimeState(); await state.prepare(signal); const slot = await state.readSlot(); if (!slot) throw Object.assign(new Error("missing"), { controlCode: "instance-not-found" }); if (!sameDevice(slot.deviceRef, request.selector.deviceRef)) throw Object.assign(new Error("conflict"), { controlCode: "instance-conflict" }); return frozen({ state, slot });
+async function slotFor(request: AcquireRuntimeRequest, signal?: AbortSignal): Promise<Readonly<{ state: LocalRuntimeState<"android" | "ios">; slot: RuntimeSlot }>> {
+  if (request.selector.kind === "auto") { const result = await resolveAutomaticSlot(request.selector.platform, signal); return frozen({ state: result.state, slot: result.slot }); }
+  const state = new LocalRuntimeState(undefined, {}, request.selector.deviceRef.platform); await state.prepare(signal); const slot = await state.readSlot(); if (!slot) throw Object.assign(new Error("missing"), { controlCode: "instance-not-found" }); if (!sameDevice(slot.deviceRef, request.selector.deviceRef)) throw Object.assign(new Error("conflict"), { controlCode: "instance-conflict" }); return frozen({ state, slot });
 }
-async function attach(slot: AndroidRuntimeSlot, disposition: "started" | "attached", instance: RuntimeInstance, signal?: AbortSignal): Promise<AcquireRuntimeLocalResult> { return attachControlSession(slot.control.port, attachment(disposition, instance), slot.control.credential, signal); }
+async function attach(slot: RuntimeSlot, disposition: "started" | "attached", instance: RuntimeInstance, signal?: AbortSignal): Promise<AcquireRuntimeLocalResult> { return attachControlSession(slot.control.port, attachment(disposition, instance), slot.control.credential, signal); }
 
 export async function acquireRuntime(input: AcquireRuntimeRequest, value?: AcquireRuntimeOptions): Promise<AcquireRuntimeLocalResult> {
   let request: AcquireRuntimeRequest, configured: AcquireRuntimeOptions; try { request = validateAcquireRuntimeRequest(input); configured = options(value); } catch { return failure("malformed-control"); }
   if (configured.signal?.aborted) return failure("request-cancelled");
-  let state: LocalRuntimeState, slot: AndroidRuntimeSlot; try { ({ state, slot } = await slotFor(request, configured.signal)); } catch (cause) { const direct = typeof cause === "object" && cause !== null && "controlCode" in cause ? cause.controlCode as ControlError["code"] : mapFailure(cause); return failure(direct); }
+  let state: LocalRuntimeState<"android" | "ios">, slot: RuntimeSlot; try { ({ state, slot } = await slotFor(request, configured.signal)); } catch (cause) { const direct = typeof cause === "object" && cause !== null && "controlCode" in cause ? cause.controlCode as ControlError["code"] : mapFailure(cause); return failure(direct); }
   if (configured.signal?.aborted) return failure("request-cancelled");
   let generation: RuntimeGenerationState | undefined, partial = false; try { generation = await state.readGeneration(slot); } catch { partial = true; }
   const expected = generation ? { instanceId: generation.instanceId, generation: generation.generation } : null, readyDeadline = performance.now() + CONTROL_DEADLINES.readiness; let live: Awaited<ReturnType<typeof helloControl>>;
@@ -77,7 +77,7 @@ export async function acquireRuntime(input: AcquireRuntimeRequest, value?: Acqui
   if (generation) { if(!await state.deleteGeneration(generation))return failure("local-state-recovery-required"); } else if (partial) { if(!await state.removePartialGeneration(slot))return failure("local-state-recovery-required"); }
   return startAndAttach(state, slot, request, configured.signal);
 }
-async function startAndAttach(state: LocalRuntimeState, initialSlot: AndroidRuntimeSlot, request: AcquireRuntimeRequest, signal?: AbortSignal, until: number | undefined = undefined, dependencies: StartDependencies = startDependencies): Promise<AcquireRuntimeLocalResult> {
+async function startAndAttach(state: LocalRuntimeState<"android" | "ios">, initialSlot: RuntimeSlot, request: AcquireRuntimeRequest, signal?: AbortSignal, until: number | undefined = undefined, dependencies: StartDependencies = startDependencies): Promise<AcquireRuntimeLocalResult> {
   if (signal?.aborted) return failure("request-cancelled");
   const deadline = until ?? dependencies.now() + CONTROL_DEADLINES.readiness;
   const remaining = deadline - dependencies.now();

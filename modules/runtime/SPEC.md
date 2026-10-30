@@ -200,7 +200,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
   `RuntimeControlSession`是client-local object，含serialized-safe `attachment`和普通`control`；`toValue()`只返回`{attachment}`。`close()`/async dispose只关闭该client的keep-alive control sockets与pending local waits，不stop stream或Runtime。Contracts规定的local/serialized enumeration、JSON与inspect边界必须保持。
 - ordinary `control`提供ensure/inspect/wait/stop。composition-root private `RuntimeOwnerControl`只提供`shutdownRuntime`；owner methods不挂到ordinary session，不属于serialized值。
-- acquire是唯一auto-binding入口。auto调用已验收Capture resolver；Runtime provider是唯一可调用`revealAndroidBinding`的consumer，并把private binding复制进persistent candidate。known只查已有safe DeviceRef，绝不调用resolver或生成/remap identity。Capture不依赖Runtime，private access不跨provider/client seam。
+- acquire是唯一auto-binding入口。Android auto调用Capture resolver并把revealed private binding复制进Android persistent candidate；iOS auto只持久化safe logical DeviceRef/control state，opaque binding access仅由Runtime child composition root在内存中取得并立即组装`CaptureSource`。known只查对应平台已有safe DeviceRef，绝不调用resolver或生成/remap identity。Capture不依赖Runtime，private access不跨provider/client seam。
 - 一个valid persistent slot保存一份32-byte CSPRNG root credential。Runtime按下文HMAC context派生不可互换的client/owner bearer；ordinary session只持有client bearer，owner provider单独持有owner bearer。same-uid malicious process仍是既有out-of-scope；该分权是server-enforced interface authority，不宣称同账号进程隔离。
 
 ### Ensure semantic key and authorization lifecycle
@@ -230,7 +230,24 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
   ```
 
   serial/paths/control均owner-private；port为49152..65535 integer；credential是32-byte CSPRNG编码成canonical 43-character unpadded base64url root；首次commit时`createdAt===updatedAt`且为`0..Number.MAX_SAFE_INTEGER` integer Unix ms。本feature不更新或轮换valid slot；rotation/rebind是后续owner recovery feature。
-- 首次auto在任何persistent publication前取得Capture binding。每caller可生成candidate DeviceRef/port/root credential，但只有下述hard-link publication winner可spawn：
+
+- `IOS-RUNTIME-CLI-MACOS-10` 新增独立 persistent final `devices/ios-only.json`，canonical exact schema/key order为：
+
+  ```text
+  {
+    stateVersion:1,
+    revision:1,
+    platform:"ios",
+    deviceRef:{contractVersion:2,platform:"ios",namespace:"fsq.ios.local",opaqueId},
+    control:{port,credential},
+    createdAt,
+    updatedAt
+  }
+  ```
+
+  iOS slot 不含binding、endpoint、provider、UDID、Session、forward handle或Capture object。它使用与Android相同的mode、canonical credential、port、timestamp、hard-link publication、directory sync、crash recovery与generation authority规则，但final/temp名称分别为`ios-only.json`和`.ios-only.<uuid>.tmp`；两个平台只清理各自temp，互不采用或覆盖。
+- iOS Runtime child 只从validated iOS DeviceRef选择`ios-only.json`，随后调用`resolveSingleIosWdaBinding()`与`createIosWdaCaptureSource({access,deviceRef})`，以`mediaProfile:"mjpeg"`启动既有Runtime。opaque access和fixed endpoint不进入state/argv/env/control wire。Android child继续用slot private binding与`h264-annexb`。
+- Android首次auto在persistent publication前取得Capture binding；iOS首次auto不探测或打开外部源，只生成safe logical-slot state。两个平台的每caller均可生成candidate DeviceRef/port/root credential，但只有下述按各自platform文件名执行的hard-link publication winner可spawn：
   1. 在validated `devices` directory内以random `.android-only.<canonical-v4-uuid>.tmp`、`O_CREAT|O_EXCL|O_WRONLY|O_NOFOLLOW`、mode0600创建同目录temp，完整写canonical bytes，`FileHandle.sync()`，close。root raw Buffer编码后fill；JS string不声称可清零。
   2. `fs.link(temp,android-only.json)`是唯一create-only linearization。成功后open parent directory并sync；到此winner durable，之后才允许spawn。
   3. unlink own temp并再次sync parent directory。final存在后，winner可删除严格匹配name、current uid、0600、regular/non-link的stale `.android-only.*.tmp`并再sync；若删除并发candidate，该caller的link得到ENOENT后必须重读/adopt final，不生成第二identity。
@@ -361,15 +378,15 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 
   ```text
   RuntimeOwnerLocal:
-    inspectLocalState({platform:"android"},{signal?}) -> OwnerLocalResult<LocalStateStatusValue>
+    inspectLocalState({platform:"android"|"ios"},{signal?}) -> OwnerLocalResult<LocalStateStatusValue>
     shutdownRuntime({deviceRef},{signal?}) -> ControlResult<ShutdownRuntimeValue>
-    resetControlState({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<ResetControlStateValue>
-    rebindDevice({platform,expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<RebindDeviceValue>
+    resetControlState({platform:"android",expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<ResetControlStateValue>
+    rebindDevice({platform:"android",expectedDeviceRef,expectedStateRevision},{signal?}) -> OwnerLocalResult<RebindDeviceValue>
     close()/asyncDispose -> Promise<void>
 
   LocalStateStatusValue =
-    {platform:"android",state:"uninitialized"}
-    | {platform:"android",state:"ready",deviceRef,stateRevision,
+    {platform:"android"|"ios",state:"uninitialized"}
+    | {platform:"android"|"ios",state:"ready",deviceRef,stateRevision,
        runtime:{state:"not-running"}|{state:"live",target:{instanceId,generation}}}
   ResetControlStateValue =
     {platform:"android",deviceRef,previousStateRevision,stateRevision}

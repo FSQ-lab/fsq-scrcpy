@@ -387,3 +387,35 @@ await test("replacement removes only matching stale generation and slot temps af
     assert.equal(replaced.slot.revision, 2);
   } finally { await fixture.close(); }
 });
+
+await test("iOS state publishes exact ios-only slot and coexists without cross-platform cleanup", async () => {
+  const fixture = await temporary(), ios = new LocalRuntimeState(fixture.root, {}, "ios");
+  try {
+    const android = (await fixture.state.initialize(BINDING, 1_800_000_000_000)).slot;
+    const first = await ios.initialize(undefined, 1_800_000_000_001), repeated = await ios.initialize(undefined, 1_800_000_000_002);
+    assert.equal(first.published, true);
+    assert.equal(repeated.published, false);
+    assert.deepEqual(repeated.slot, first.slot);
+    assert.equal(first.slot.deviceRef.platform, "ios");
+    assert.equal(first.slot.deviceRef.namespace, "fsq.ios.local");
+    assert.deepEqual(await readdir(ios.devices), ["android-only.json", "ios-only.json"]);
+    const source = await readFile(ios.slotPath, "utf8"), parsed = JSON.parse(source) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(parsed), ["stateVersion", "revision", "platform", "deviceRef", "control", "createdAt", "updatedAt"]);
+    assert.equal(source.includes("binding"), false);
+    assert.equal(source.includes("endpoint"), false);
+    for (const invalid of [
+      { ...parsed, revision: 2 },
+      { ...parsed, updatedAt: (parsed.updatedAt as number) + 1 },
+      { ...parsed, deviceRef: { ...(parsed.deviceRef as Record<string, unknown>), namespace: "fsq.other.local" } },
+    ]) assert.throws(() => controlStateInternals.parseSlot(JSON.stringify(invalid), "ios"), LocalStateFailure);
+    assert.deepEqual(controlStateInternals.parseSlot(source, "ios"), first.slot);
+    const androidTemp = join(ios.devices, `.android-only.${randomUUID()}.tmp`), iosTemp = join(ios.devices, `.ios-only.${randomUUID()}.tmp`);
+    await writeFile(androidTemp, "keep", { mode: 0o600 });
+    await writeFile(iosTemp, "remove", { mode: 0o600 });
+    await ios.sweepTemps();
+    assert.deepEqual((await readdir(ios.devices)).sort(), [androidTemp.split("/").at(-1)!, "android-only.json", "ios-only.json"].sort());
+    await fixture.state.sweepTemps();
+    assert.deepEqual(await readdir(ios.devices), ["android-only.json", "ios-only.json"]);
+    assert.equal(android.platform, "android");
+  } finally { await fixture.close(); }
+});

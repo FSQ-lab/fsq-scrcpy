@@ -115,7 +115,16 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - resolver 表示当前 macOS 账户的单一 iOS logical video slot，不识别或证明物理 iPhone。外部 owner 将 forward 指向另一台 iPhone 时 slot identity 保持；自动化与视频目标的物理一致性属于后续跨项目 integration 验收。
 - FSQ 不检查 USB device、UDID、WDA/Appium Session identity 或 forward ownership；不安装、签名、启动、停止、配置或修复 WDA；不创建、检查或管理 forward；不发送 WebDriver、Settings 或设备控制命令。
 - resolution 不执行 filesystem、process、environment、socket、HTTP、DNS、proxy、USB 或 Capture-source I/O；不创建 DeviceRef、不打开 WDA MJPEG、不启动 Runtime/Viewer、不持久化状态、不暴露 endpoint。WDA/forward availability 仍由已验收 iOS standalone contract 的 demand-time Capture 行为判定。
-- 仅 Capture 变化。Contracts、Runtime、Viewer、Integrations no-delta；CLI、MCP、RuntimeControl、Appium integration、多 slot、second-source detection、physical identity 与 platform/support claim 均不在范围内。
+- 本 Feature09 本身只改变 Capture；下方 `IOS-RUNTIME-CLI-MACOS-10` 才允许 Contracts、Runtime 与 Integrations 消费该 seam。MCP、Appium integration、多 slot、second-source detection、physical identity 与 platform/support claim 均不在 Feature09 范围内。
+
+## macOS iOS WDA Runtime and CLI Contract
+
+- `IOS-RUNTIME-CLI-MACOS-10` 只覆盖本地 macOS arm64、外部 owner 已运行 WDA v16.15.3 并建立 fixed loopback forward、一个 persistent iOS Runtime/stream 和 standalone Chrome Viewer；支持矩阵保持为空。
+- `selector:auto/ios` 原子创建或复用 `devices/ios-only.json` 中的安全 `DeviceRef{platform:"ios",namespace:"fsq.ios.local"}` 与独立 control authority。`selector:known` 只连接该既有 identity；Android `android-only.json`、binding 与 maintenance 语义不变。
+- Runtime child 是 trusted composition root：只在进程内取得 opaque `IosWdaBindingAccess`，调用 `createIosWdaCaptureSource`，并只把 platform-neutral `CaptureSource` 与 `mjpeg` profile 交给既有 Runtime。access、endpoint、UDID、Session、authority 和 raw provider error 不进入 argv、environment、persistent state、普通结果、日志、URL 或模型上下文。
+- 既有 ensure/inspect/wait/watch/stop 与 owner shutdown 复用 unchanged RuntimeControl wire、ControlVersion、feature tuple、Viewer descriptor/state 和错误语义。缺失或异常 forward 只在 authenticated visible demand 的 Capture open 阶段以既有安全 availability/media 错误失败。
+- CLI 新增 `viewer ensure --platform ios` 与 `local-state status --platform ios`；stored-identity 命令在两个本机 slot 中选择唯一 matching opaqueId 或唯一 live/ready identity，多候选 fail closed 为 `device-ambiguous`。iOS 不增加 reset/rebind。
+- stop stream、Viewer close 与 Runtime shutdown 只释放 FSQ 资源，不停止、修复或重配 WDA、forward、Appium Session 或自动化；不声明物理 iPhone 关联、MCP、embedded Viewer、多 iPhone slot 或平台支持。
 
 ## macOS Android RuntimeControl v1
 

@@ -37,7 +37,7 @@ import {
   type StopStreamValue,
   type WaitControlRequest,
 } from "../../contracts/src/index.js";
-import type { AndroidRuntimeSlot, RuntimeGenerationState } from "./control-state.js";
+import type { RuntimeGenerationState, RuntimeSlot } from "./control-state.js";
 import { MutationCancelled } from "./state.js";import type { RuntimeService } from "./index.js";
 
 export interface RuntimeOwnerControl extends AsyncDisposable {
@@ -47,7 +47,7 @@ export interface RuntimeOwnerControl extends AsyncDisposable {
 export type AcquireRuntimeLocalResult = Readonly<{ ok: true; session: RuntimeControlSession }> | Readonly<{ ok: false; error: ControlError }>;
 export interface ControlTimer{mono():number;set(delay:number,callback:()=>void):object;clear(handle:object):void}
 export interface RuntimeControlHostOptions {
-  readonly service?: RuntimeService;readonly slot: AndroidRuntimeSlot;readonly generation: RuntimeGenerationState;readonly onShutdown: () => Promise<void>;readonly timer?:ControlTimer;
+  readonly service?: RuntimeService;readonly slot: RuntimeSlot;readonly generation: RuntimeGenerationState;readonly onShutdown: () => Promise<void>;readonly timer?:ControlTimer;
 }
 const ROUTES = Object.freeze({
   "/v1/control/hello": "client", "/v1/viewer/ensure": "client", "/v1/stream/inspect": "client", "/v1/stream/wait": "client", "/v1/stream/stop": "client", "/v1/runtime/shutdown": "owner",
@@ -85,7 +85,7 @@ function decodeRouteResponse(route:Route,response:IncomingMessage,bytes:Uint8Arr
 export class RuntimeControlProvider {
   readonly instance: RuntimeInstance;
   #service: RuntimeService; #shutdown: () => Promise<void>; #shuttingDown = false; #ready = false;
-  constructor(service: RuntimeService, slot: AndroidRuntimeSlot, generation: RuntimeGenerationState, shutdown: () => Promise<void>) {
+  constructor(service: RuntimeService, slot: RuntimeSlot, generation: RuntimeGenerationState, shutdown: () => Promise<void>) {
     this.#service = service; this.#shutdown = shutdown;
     this.instance = frozen({ controlVersion: CONTROL_VERSION, instanceId: generation.instanceId, generation: generation.generation, contractVersion: 2, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
   }
@@ -123,7 +123,7 @@ export interface ControlAdmissionSnapshot{readonly preauth:number;readonly authe
 
 interface SocketState { authenticated?: "client" | "owner"; requests: number; inFlight: boolean; preauth: boolean;headerTimer?:ArmedDeadline }
 export class RuntimeControlHost {
-  #provider: RuntimeControlProvider | undefined; #slot: AndroidRuntimeSlot | undefined; #generation: RuntimeGenerationState | undefined; #shutdown: (() => Promise<void>) | undefined; #server: HttpServer | undefined; #sockets = new Map<Socket, SocketState>(); #authenticated = 0; #inFlight = 0; #waits=0; #client: Buffer; #owner: Buffer; #port: number; #ready = false; #readyPromise: Promise<void>; #resolveReady!: () => void;#timer:ControlTimer;
+  #provider: RuntimeControlProvider | undefined; #slot: RuntimeSlot | undefined; #generation: RuntimeGenerationState | undefined; #shutdown: (() => Promise<void>) | undefined; #server: HttpServer | undefined; #sockets = new Map<Socket, SocketState>(); #authenticated = 0; #inFlight = 0; #waits=0; #client: Buffer; #owner: Buffer; #port: number; #ready = false; #readyPromise: Promise<void>; #resolveReady!: () => void;#timer:ControlTimer;
   constructor(options: RuntimeControlHostOptions) { this.#timer=options.timer??SYSTEM_CONTROL_TIMER;this.#readyPromise = new Promise((resolve) => { this.#resolveReady = resolve; }); this.#slot = options.slot; this.#generation = options.generation; this.#shutdown = options.onShutdown; this.#client = derive(options.slot.control.credential, "client"); this.#owner = derive(options.slot.control.credential, "owner"); this.#port = options.slot.control.port; if (options.service) this.activate(options.service); }
   get provider(): RuntimeControlProvider { if (!this.#provider) throw new TypeError("Runtime control provider is not ready"); return this.#provider; }
   activate(service: RuntimeService): void { if (this.#provider || !this.#slot || !this.#generation || !this.#shutdown) throw new TypeError("Runtime control provider is already active"); this.#provider = new RuntimeControlProvider(service, this.#slot, this.#generation, this.#shutdown); this.#slot = undefined; this.#generation = undefined; this.#shutdown = undefined; }
@@ -264,7 +264,7 @@ class HttpRuntimeControl implements RuntimeControl {
   }
 }
 async function collect(response: IncomingMessage,timer:ControlTimer): Promise<Uint8Array> { const chunks: Buffer[] = []; let bytes = 0, timedOut = false,idle:object|undefined; const arm=()=>{if(idle)timer.clear(idle);idle=timer.set(CONTROL_DEADLINES.readIdle,()=>{timedOut=true;response.destroy();});};arm();try { for await (const chunk of response) {arm();const value=Buffer.from(chunk as Uint8Array);bytes+=value.length;if(bytes>16_384){response.destroy();throw new Error("overload");}chunks.push(value);}if(timedOut)throw new Error("timeout");return Buffer.concat(chunks);}finally{if(idle)timer.clear(idle);} }
-export async function helloControl(slot: AndroidRuntimeSlot, expected: RuntimeTarget | null, signal?: AbortSignal,timer:ControlTimer=SYSTEM_CONTROL_TIMER): Promise<ControlResult<HelloControlValue>> {
+export async function helloControl(slot: RuntimeSlot, expected: RuntimeTarget | null, signal?: AbortSignal,timer:ControlTimer=SYSTEM_CONTROL_TIMER): Promise<ControlResult<HelloControlValue>> {
   const target = expected ?? { instanceId: "00000000-0000-4000-8000-000000000000", generation: "00000000-0000-4000-8000-000000000000" },client = new HttpRuntimeControl(slot.control.port, target, deriveControlBearer(slot.control.credential, "client"),timer);
   try { return await client.call("/v1/control/hello", { controlVersion: CONTROL_VERSION, contractVersion: 2, deviceRef: slot.deviceRef, expectedInstance: expected }, signal ? { signal } : undefined) as ControlResult<HelloControlValue>; } finally { await client.close(); }
 }

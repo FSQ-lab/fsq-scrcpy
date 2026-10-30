@@ -34,6 +34,7 @@ const ID = "123e4567-e89b-42d3-a456-426614174000";
 const GENERATION = "223e4567-e89b-42d3-a456-426614174000";
 const STREAM = "323e4567-e89b-42d3-a456-426614174000";
 const DEVICE = Object.freeze({ contractVersion: 2 as const, platform: "android" as const, namespace: "fsq.android.local", opaqueId: ID });
+const IOS_DEVICE = Object.freeze({ contractVersion: 2 as const, platform: "ios" as const, namespace: "fsq.ios.local", opaqueId: GENERATION });
 const INSTANCE: RuntimeInstance = Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: ID, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
 const ATTACHMENT = Object.freeze({ disposition: "attached" as const, instance: INSTANCE });
 const DESCRIPTOR = Object.freeze({ contractVersion: 2 as const, streamId: STREAM, standaloneUri: `http://127.0.0.1:43210/viewer/${STREAM}`, presentationModes: Object.freeze(["standalone"] as const), expiresAt: 1_800_000_060_000 });
@@ -41,22 +42,22 @@ const SNAPSHOT = Object.freeze({ streamId: STREAM, deviceRef: DEVICE, revision: 
 const invalid = (run: () => unknown): void => { assert.throws(run, (cause: unknown) => cause instanceof ContractValidationError); };
 const bytes = (text: string): Uint8Array => new TextEncoder().encode(text);
 
-await test("control identity values accept only exact Android v1 shapes", () => {
+await test("control identity values accept exact Android and iOS v1 shapes", () => {
   assert.equal(validateControlVersion(CONTROL_VERSION), CONTROL_VERSION);
   assert.deepEqual(validateRuntimeTarget({ instanceId: ID, generation: GENERATION }), { instanceId: ID, generation: GENERATION });
-  assert.deepEqual(validateDeviceSelector({ kind: "auto", platform: "android" }), { kind: "auto", platform: "android" });
-  assert.deepEqual(validateDeviceSelector({ kind: "known", deviceRef: DEVICE }), { kind: "known", deviceRef: DEVICE });
+  for (const platform of ["android", "ios"] as const) assert.deepEqual(validateDeviceSelector({ kind: "auto", platform }), { kind: "auto", platform });
+  for (const deviceRef of [DEVICE, IOS_DEVICE]) assert.deepEqual(validateDeviceSelector({ kind: "known", deviceRef }), { kind: "known", deviceRef });
   assert.equal(validateRuntimeInstance(INSTANCE), INSTANCE);
   assert.equal(validateRuntimeAttachment(ATTACHMENT), ATTACHMENT);
-  assert.deepEqual(validateAcquireRuntimeRequest({ mode: "start-or-attach", selector: { kind: "auto", platform: "android" } }), { mode: "start-or-attach", selector: { kind: "auto", platform: "android" } });
-  assert.deepEqual(validateAcquireRuntimeRequest({ mode: "attach-only", selector: { kind: "known", deviceRef: DEVICE } }), { mode: "attach-only", selector: { kind: "known", deviceRef: DEVICE } });
+  assert.deepEqual(validateAcquireRuntimeRequest({ mode: "start-or-attach", selector: { kind: "auto", platform: "ios" } }), { mode: "start-or-attach", selector: { kind: "auto", platform: "ios" } });
+  assert.deepEqual(validateAcquireRuntimeRequest({ mode: "attach-only", selector: { kind: "known", deviceRef: IOS_DEVICE } }), { mode: "attach-only", selector: { kind: "known", deviceRef: IOS_DEVICE } });
 });
 
-await test("selectors reject iOS, legacy contracts, remapping fields and prototypes", () => {
+await test("selectors reject unknown platforms, legacy contracts, remapping fields and prototypes", () => {
   for (const value of [
-    { kind: "auto", platform: "ios" },
+    { kind: "auto", platform: "windows" },
     { kind: "auto", platform: "android", serial: "private" },
-    { kind: "known", deviceRef: { ...DEVICE, platform: "ios" } },
+    { kind: "known", deviceRef: { ...DEVICE, platform: "windows" } },
     { kind: "known", deviceRef: { ...DEVICE, contractVersion: 1 } },
     { kind: "known", deviceRef: DEVICE, remap: true },
     Object.assign(Object.create({}), { kind: "auto", platform: "android" }),

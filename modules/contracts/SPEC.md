@@ -122,12 +122,12 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 ## Local RuntimeControl Values v1
 
-本节定义已确认的本机cross-process RuntimeControl值；`ANDROID-RUNTIME-CONTROL-MACOS-02`基线及下方`ANDROID-CONTROL-WAIT-MACOS-04` clean cutover共同构成当前契约。CLI wait/watch、Windows、iOS或Model Context Protocol仍未启用。
+本节定义已确认的本机 cross-process RuntimeControl 值；Android RuntimeControl/wait 基线与 `IOS-RUNTIME-CLI-MACOS-10` 共用同一 ControlVersion 和 wire values。CLI wait/watch 与 iOS Runtime 复用既有值，不增加 route 或 wire 字段；Windows 与 Model Context Protocol 仍未启用。
 
 ### Exact values and local/serialized split
 
 - `ControlVersion`恰好为 `{major:1,minor:0}`；与Contracts `contractVersion:2`和FSQV media版本独立。`RuntimeTarget`恰好为 `{instanceId,generation}`，两者都是canonical non-nil RFC4122 variant-1/version-4 UUID。
-- `DeviceSelector`恰好为 `{kind:"auto",platform:"android"}` 或 `{kind:"known",deviceRef:DeviceRef}`；额外字段、iOS/未知platform和错误prototype拒绝。auto允许首次生成或复用安全DeviceRef；known从不生成、重映射或修改identity。
+- `DeviceSelector`恰好为 `{kind:"auto",platform:"android"|"ios"}` 或 `{kind:"known",deviceRef:DeviceRef}`；额外字段、未知platform和错误prototype拒绝。auto允许为所选平台首次生成或复用安全DeviceRef；known接受已验证的 Android/iOS DeviceRef，且从不生成、重映射或修改identity。
 - `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:["wait-v1","auto-bootstrap-v1"]}`；feature tuple deep-frozen且不接受空/旧/额外/重复/未知/乱序值。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
 - `HelloControlValue`恰好为 `{instance:RuntimeInstance}`。`EnsureViewerValue`恰好为 `{deviceRef,descriptor:ViewerDescriptor,snapshot:StreamSnapshot}`。`InspectControlValue`恰好为 `{snapshot,changes,reset,timedOut}`。`StopStreamValue`恰好为 `{snapshot}`。owner-only `ShutdownRuntimeValue`恰好为 `{instanceId,generation}`。
 - `ControlWireValue`只包含本节列出的plain serialized values。generic `ControlResult<T extends ControlWireValue>`恰好为 `{ok:true,value:T}|{ok:false,error:ControlError}`。只有stop expectedRevision mismatch使用 `{ok:false,error:RevisionConflictError,snapshot:StreamSnapshot}`；任何其他失败禁止`snapshot`。
