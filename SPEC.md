@@ -2,7 +2,7 @@
 
 ## Project Specification Ownership
 
-本文件记录项目级已确认事实、全局约束与模块索引。模块细节由对应模块 SPEC 维护；开发流程由 [AGENTS.md](AGENTS.md) 和相关技能定义。
+本文件记录项目级已确认事实、全局约束与模块索引。模块细节由对应模块 SPEC 维护；项目计划、优先级、依赖、状态与验收证据由 GitHub Issues 管理，协作规则见 [AGENTS.md](AGENTS.md)。
 
 本项目目标是在设备由测试或 Coding Agent 操作时，向用户提供实时设备画面。它与 `Appium_connect_agent` 协作：对方负责操控和语义观测，本项目负责视频采集、分发和 Viewer。
 
@@ -47,7 +47,7 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 
 - 产品最终目标平台包括 Android、iOS 和 macOS；各平台须按独立 feature 和真实验证证据进入支持矩阵。
 - 第一批固定为 macOS 本地宿主、USB Android、单设备单流。
-- 第一批最低目标为 720p 和 30 FPS；精确定义、测量方法和环境须在设计与验收中确认。当前 Feature 不包含端到端显示延迟目标或支持声明。
+- 第一批最低目标为 720p 和 30 FPS；精确定义、测量方法和环境由技术契约及对应 GitHub Issue 记录。当前契约不包含端到端显示延迟目标或支持声明。
 - Viewer 首批为只读观看面，不发送设备控制命令。
 - 支持 MCP Apps 的 Coding Agent 可内嵌 Viewer；其他宿主必须获得可打开的 Viewer URL。
 - 视频帧不得进入模型文本上下文，MCP 不作为逐帧媒体传输通道。
@@ -65,25 +65,25 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - 第一批实现基线为 Node.js 24.22.1 LTS、严格 TypeScript 7.0.2、`ws@8.22.0`、`openpgp@6.3.2`、framework-free Viewer 与 Node 内建测试；精确用途、开发依赖、许可证和 lock 门槛由已批准选型记录维护。
 - 第一批不得因最终三平台目标而同时实现 iOS 或 macOS Capture。
 - 不将 iPhone-use 的 MCP JPEG 轮询实现视为本项目传输契约；它仅作为 MCP App 生命周期和 iOS 采集研究参考。
-- 新公共接口、依赖方向、平台支持、性能承诺、远程访问、录制、音频或 Viewer 控制能力必须经过 SPEC gate 和用户确认。
+- 新公共接口、依赖方向、平台支持、性能承诺、远程访问、录制、音频或 Viewer 控制能力必须先记录在对应 GitHub Issue，并在交付中同步更新适用技术契约。
 - 默认只绑定本机可达范围；远程或云端 Agent 访问本机视频涉及认证、relay 或网络穿透，当前不在首批范围。
 - 视频内容默认不落盘。任何录制、上传、遥测或外部传输都需要独立确认并明确隐私边界。
 
 ## Android First-Batch Contract v1
 
-- The first acceptance target is a local macOS arm64 host, one USB Android handheld satisfying the capability policy, one logical video stream and one active standalone Chrome Viewer. The support matrix remains empty until all real-device/browser/performance/cleanup evidence passes independent review and a later SPEC delta names a supported combination.
+- The first acceptance target is a local macOS arm64 host, one USB Android handheld satisfying the capability policy, one logical video stream and one active standalone Chrome Viewer. The support matrix remains empty until the owning GitHub Issue records complete real-device/browser/performance/cleanup evidence and the current contract names the supported combination.
 - Device support is capability-based: one built-in non-foldable primary display, USB debugging, hardware H.264 encoder, sufficient native pixels, and no manufacturer-published security-support EOL reached on the validation date. Exact device/OS/security-patch/encoder versions are validation evidence, not allowlist entries.
 - Active decoded video is at least 720 pixels on the short edge, preserves aspect ratio without crop/stretch/upscaling, targets 30 FPS under the confirmed bounded-jitter thresholds, and reaches first Live within 5 seconds after authorization.
-- `ANDROID-STANDALONE-01` makes no glass-to-glass latency bound or support claim. External high-speed glass-to-glass measurement is deferred as non-blocking performance research; any future latency commitment or support claim requires a new SPEC delta and real evidence.
+- `ANDROID-STANDALONE-01` makes no glass-to-glass latency bound or support claim. External high-speed glass-to-glass measurement is deferred as non-blocking performance research; any future latency commitment or support claim requires a technical-contract update and real evidence in its GitHub Issue.
 - Capture uses pinned `scrcpy-server v5.0.1` plus `ScrcpyV501CaptureAdapter`; the atomic compatibility identity is server semantic version + official artifact SHA-256 + Adapter protocol version. Raw stream, full-client embedding and forks are not first-batch paths.
 - The server asset is acquired only from the pinned official release, verified by signed checksum material and SHA-256, admitted to a private content-addressed cache, and rehashed before every push. An explicit offline path must pass the same identity checks. No latest/system fallback is allowed.
 - ADB is user-installed and admitted by bounded capability checks rather than a version allowlist. FSQ_scrcpy does not download, bundle, redistribute, kill or replace the user's global ADB server.
 - H.264 Annex B, versioned binary WebSocket, Chrome WebCodecs in a Web Worker and Canvas are the first media path. FSQ_scrcpy implements and redistributes no codec. MSE/FFmpeg/WebTransport are not first-batch dependencies.
 - Runtime 和 Viewer 只绑定 loopback；authenticated ensure auto-bootstrap、session capability、Host 和 Origin 策略由模块契约固定，Viewer URI不携带secret。
 - Only an authenticated visible Viewer renews demand. Hidden/pagehide/disconnect starts a 5-second grace; return within grace reuses the StreamId and must Sync to a fresh painted frame. Grace expiry stops the stream. In the current contract, media/encoder/socket interruption ends the stream with a typed terminal/state-unknown result and requires explicit user retry with a new StreamId; bounded same-StreamId restart is reserved for a later SPEC delta. Proven device removal is terminal immediately.
-- The current contract freezes shared identities/errors and media protocol v1. External launch/attach control transport and `Appium_connect_agent` integration are not part of the current contract; adding them requires a later cross-repository SPEC delta and must expose no media/scrcpy internals.
-- Runtime prerequisite and exact dependency selection are maintained in [the approved selection record](docs/tasks/2026-10-23-runtime-dependency-selection.md): Node.js 24.22.1 LTS, production `ws@8.22.0` and `openpgp@6.3.2`, and the exact development dependency set recorded there. Actual lock closure and licenses must be verified before implementation Ready.
-- Audio, recording, remote/cloud access, multiple devices/streams/Viewers, iOS/macOS Capture, Viewer control, external launch/attach and MCP App implementation are outside the current v1 standalone contract. Each addition requires its own SPEC delta and real validation.
+- The current contract freezes shared identities/errors and media protocol v1. External launch/attach control transport and `Appium_connect_agent` integration are not part of the current contract; adding them requires linked cross-repository Issues and synchronized technical-contract updates, and must expose no media/scrcpy internals.
+- Runtime prerequisite and exact dependency selection are maintained in [the approved selection record](docs/tasks/2026-10-23-runtime-dependency-selection.md): Node.js 24.22.1 LTS, production `ws@8.22.0` and `openpgp@6.3.2`, and the exact development dependency set recorded there. Actual lock closure and licenses must be verified before implementation.
+- Audio, recording, remote/cloud access, multiple devices/streams/Viewers, iOS/macOS Capture, Viewer control, external launch/attach and MCP App implementation are outside the current v1 standalone contract. Each addition requires its own GitHub Issue, technical-contract update and real validation.
 
 ## iOS WDA Standalone Contract
 
@@ -95,7 +95,7 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - Contracts control v2 全仓 clean cutover，支持 provider-neutral `android|ios` 身份；不保留 v1 alias、validator 或升级 shim。外部跨进程控制协议仍未定义。
 - iOS 唯一数值媒体目标：健康且已准备的源，从首次有效 authenticated visible demand 到当前 epoch 首次 fresh painted ACK ≤5 秒。没有分辨率、FPS 或 glass-to-glass 延迟承诺。
 - MJPEG 2 秒无新鲜 paint 离开 Live；12 秒无新鲜 paint 终止。无同 StreamId source restart。关闭 FSQ 只释放其拥有的资源，WDA、forward 和自动化不受影响。
-- 生产依赖新增精确 `exifr@7.1.3`，仅内存 JPEG EXIF orientation；有界 WDA 专用 multipart/JPEG SOF 解析为已批准自研例外。实际包/API、完整性、许可证和 lock closure 仍须在 implementation Ready 前核验。
+- 生产依赖新增精确 `exifr@7.1.3`，仅内存 JPEG EXIF orientation；有界 WDA 专用 multipart/JPEG SOF 解析为已批准自研例外。实际包/API、完整性、许可证和 lock closure 必须在实现前核验并记录于对应 GitHub Issue。
 - 帧只在内存；WDA endpoint、UDID、Session ID、provider locator/error 不进入公共契约、日志、模型输出或 Viewer URL。浏览器只连接受保护 FSQ origin。
 - 详细契约由四个模块 SPEC 的同名契约定义；既有 loopback、auto-bootstrap/session capability、Host/Origin、CSP、五秒 Viewer grace、first-cause terminalization 和 Android 约束保持有效。
 
@@ -168,9 +168,9 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - MCP wait固定为`0..25000ms`、缺省25000ms；适用Host或验收客户端总调用预算必须至少45000ms。取消、EOF或客户端退出只释放该调用/session，不stop stream或Runtime。
 - 每个MCP结果同时提供同一个validated safe DTO的`structuredContent`与compact JSON text mirror；禁止image/resource/media。现代协议的标准result metadata不进入产品DTO。
 - 现有`fsq-scrcpy --json`四个ordinary操作是无MCP Host的cooperative fallback，不新增wrapper、daemon、私有shell协议或owner authority。
-- 生产依赖固定`@modelcontextprotocol/server@2.3.1`与`zod@4.6.7`；验收开发依赖固定`@modelcontextprotocol/client@2.3.1`。实际lock、完整性、provenance、安全、SBOM和许可证闭环是Implementation Ready门槛。
-- active verified Coding Agent Host register初始为空。任何后续MCP或CLI Host必须固定exact identity并通过独立no-product-churn parity gate；否则不得产生Host兼容或支持声明。
-- `FSQ_scrcpy`不依赖或修改任何第三方 Coding Agent Host；任何Host fix、release、version或commit都不是Ready/Done前置，并且不得为Host增加专属branch、shim、flag、result shape或cancellation proxy。
+- 生产依赖固定`@modelcontextprotocol/server@2.3.1`与`zod@4.6.7`；验收开发依赖固定`@modelcontextprotocol/client@2.3.1`。实际lock、完整性、provenance、安全、SBOM和许可证闭环必须在实现前核验并记录于对应 GitHub Issue。
+- active verified Coding Agent Host register初始为空。任何后续MCP或CLI Host必须固定exact identity，并在独立 GitHub Issue 完成no-product-churn parity验收；否则不得产生Host兼容或支持声明。
+- `FSQ_scrcpy`不依赖或修改任何第三方 Coding Agent Host；任何Host fix、release、version或commit都不是交付前置，并且不得为Host增加专属branch、shim、flag、result shape或cancellation proxy。
 - Contracts、Runtime、Capture和Viewer行为no-delta；媒体、provider locator、authority、credential及其他私有值继续禁止进入MCP、CLI、模型上下文、日志或文件。
 - 本Feature的当前契约止于Host-neutral MCP Adapter、installed dual-era stdio协议、四工具与CLI/全模块自动回归；它不建立具体Host支持声明。
 - 最终Viewer链由下方已确认的Runtime-owned 11B契约拥有；11A接口保持no-delta。
