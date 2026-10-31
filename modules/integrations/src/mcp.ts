@@ -23,12 +23,12 @@ const revision = z.number().int().min(1).max(Number.MAX_SAFE_INTEGER);
 const waitMilliseconds = z.number().int().min(0).max(25_000).refine((value) => !Object.is(value, -0)).default(25_000);
 const deviceRef = z.strictObject({
   contractVersion: z.literal(2),
-  platform: z.literal("android"),
+  platform: z.enum(["android", "ios"]),
   namespace: z.string().min(1).max(64).regex(NAMESPACE),
   opaqueId: uuid,
 });
 const selector = z.discriminatedUnion("kind", [
-  z.strictObject({ kind: z.literal("auto"), platform: z.literal("android") }),
+  z.strictObject({ kind: z.literal("auto"), platform: z.enum(["android", "ios"]) }),
   z.strictObject({ kind: z.literal("known"), deviceRef }),
 ]);
 
@@ -76,7 +76,7 @@ export function createMcpServer(agent: AgentControl = createAgentControl(),prese
   const server = new McpServer({ name: "fsq-scrcpy", version: "0.0.0" }, { maxToolInputElements: 16 }),appHtml=loadViewerAppResource();
   let presentation:Presentation|undefined,projectionVersion=0;
   server.registerTool(MCP_TOOL_NAMES[0],{inputSchema:MCP_INPUT_SCHEMAS.ensure,_meta:{ui:{resourceUri:APP_URI,visibility:["model"]},"ui/resourceUri":APP_URI}},async(input,context)=>{
-    const extension=server.server.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"] as {mimeTypes?:unknown}|undefined,version=++projectionVersion,prepareEmbedded=Array.isArray(extension?.mimeTypes)&&extension.mimeTypes.includes(UI_MIME);presentation=undefined;try{const transaction=await presenter.ensure({selector:input.selector,prepareEmbedded},{signal:context.mcpReq.signal}),result=transaction.result,prepared=transaction.prepared;if(result.ok&&prepared?.ok&&version===projectionVersion&&prepareEmbedded){const uri=new URL(result.value.descriptor.standaloneUri);presentation=Object.freeze({streamId:prepared.value.streamId,origin:uri.origin,expiresAt:prepared.value.expiresAt});}return project(result as unknown as SafeResult);}catch{return project(runtimeExitedResult() as unknown as SafeResult);}
+    const extension=server.server.getClientCapabilities()?.extensions?.["io.modelcontextprotocol/ui"] as {mimeTypes?:unknown}|undefined,version=++projectionVersion,android=input.selector.kind==="auto"?input.selector.platform==="android":input.selector.deviceRef.platform==="android",prepareEmbedded=android&&Array.isArray(extension?.mimeTypes)&&extension.mimeTypes.includes(UI_MIME);presentation=undefined;try{const transaction=await presenter.ensure({selector:input.selector,prepareEmbedded},{signal:context.mcpReq.signal}),result=transaction.result,prepared=transaction.prepared;if(result.ok&&prepared?.ok&&version===projectionVersion&&prepareEmbedded){const uri=new URL(result.value.descriptor.standaloneUri);presentation=Object.freeze({streamId:prepared.value.streamId,origin:uri.origin,expiresAt:prepared.value.expiresAt});}return project(result as unknown as SafeResult);}catch{return project(runtimeExitedResult() as unknown as SafeResult);}
   });
   server.registerResource("FSQ Device Viewer",APP_URI,{mimeType:UI_MIME,description:"Read-only live device video",_meta:{ui:{prefersBorder:true,csp:{connectDomains:[],resourceDomains:[]}}}},async()=>{const current=presentation,ui=current?{prefersBorder:true,csp:{connectDomains:[current.origin,current.origin.replace(/^http:/,"ws:")],resourceDomains:[current.origin]}}:{prefersBorder:true,csp:{connectDomains:[],resourceDomains:[]}};return{contents:[{uri:APP_URI,mimeType:UI_MIME,text:appHtml,_meta:{ui}}]};});
   server.registerTool(MCP_TOOL_NAMES[1], { inputSchema: MCP_INPUT_SCHEMAS.inspect }, (input, context) => withKnown(

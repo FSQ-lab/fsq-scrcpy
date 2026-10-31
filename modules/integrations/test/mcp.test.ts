@@ -22,6 +22,12 @@ const DEVICE: DeviceRef = Object.freeze({
   namespace: "fsq.android.local",
   opaqueId: DEVICE_ID,
 });
+const IOS_DEVICE: DeviceRef = Object.freeze({
+  contractVersion: 2,
+  platform: "ios",
+  namespace: "fsq.ios.local",
+  opaqueId: "523e4567-e89b-42d3-a456-426614174000",
+});
 const SNAPSHOT: StreamSnapshot = Object.freeze({
   streamId: STREAM_ID,
   deviceRef: DEVICE,
@@ -65,6 +71,10 @@ const ENSURE: EnsureAdapterResult = Object.freeze({
     snapshot: SNAPSHOT,
   }),
 });
+const IOS_SNAPSHOT: StreamSnapshot = Object.freeze({ ...SNAPSHOT, deviceRef: IOS_DEVICE });
+const IOS_ATTACHMENT: RuntimeAttachment = Object.freeze({ ...ATTACHMENT, instance: Object.freeze({ ...ATTACHMENT.instance, deviceRef: IOS_DEVICE }) });
+const IOS_INSPECT = Object.freeze({ ...INSPECT, value: Object.freeze({ ...INSPECT.value, snapshot: IOS_SNAPSHOT, changes: Object.freeze([IOS_SNAPSHOT]) }) });
+const IOS_ENSURE: EnsureAdapterResult = Object.freeze({ ok: true, value: Object.freeze({ ...ENSURE.value, attachment: IOS_ATTACHMENT, deviceRef: IOS_DEVICE, snapshot: IOS_SNAPSHOT }) });
 const ensureAt=(streamId:string,port:number):EnsureAdapterResult=>Object.freeze({ok:true as const,value:Object.freeze({attachment:ATTACHMENT,deviceRef:DEVICE,descriptor:Object.freeze({...ENSURE.value.descriptor,streamId,standaloneUri:`http://127.0.0.1:${port}/viewer/${streamId}`}),snapshot:Object.freeze({...SNAPSHOT,streamId})})});
 interface Calls {
   ensure: unknown[];
@@ -76,7 +86,8 @@ interface Calls {
   signals: AbortSignal[];
   closes: number;
 }
-function fixture(overrides: Partial<AgentControlSession> = {}): { agent: AgentControl; presenter:AgentPresentation; calls: Calls } {
+interface FixtureValues { readonly ensure: EnsureAdapterResult; readonly inspect: Awaited<ReturnType<AgentControlSession["inspect"]>>; readonly snapshot: StreamSnapshot }
+function fixture(overrides: Partial<AgentControlSession> = {}, values: FixtureValues = { ensure: ENSURE, inspect: INSPECT, snapshot: SNAPSHOT }): { agent: AgentControl; presenter:AgentPresentation; calls: Calls } {
   const calls: Calls = {
     ensure: [],
     open: [],
@@ -91,18 +102,18 @@ function fixture(overrides: Partial<AgentControlSession> = {}): { agent: AgentCo
     async inspect(input, options) {
       calls.inspect.push(input);
       if (options?.signal) calls.signals.push(options.signal);
-      return INSPECT;
+      return values.inspect;
     },
     async wait(input, options) {
       calls.wait.push(input);
       if (options?.signal) calls.signals.push(options.signal);
-      return INSPECT;
+      return values.inspect;
     },
     async prepareEmbedded(input,options){calls.prepare.push(input);if(options?.signal)calls.signals.push(options.signal);return Object.freeze({ok:true as const,value:Object.freeze({streamId:STREAM_ID,expiresAt:60})});},
     async stop(input, options) {
       calls.stop.push(input);
       if (options?.signal) calls.signals.push(options.signal);
-      return { ok: true, value: { snapshot: SNAPSHOT } };
+      return { ok: true, value: { snapshot: values.snapshot } };
     },
     async close() { calls.closes++; },
     ...overrides,
@@ -113,7 +124,7 @@ function fixture(overrides: Partial<AgentControlSession> = {}): { agent: AgentCo
       async ensure(input, options) {
         calls.ensure.push(input);
         if (options?.signal) calls.signals.push(options.signal);
-        return ENSURE;
+        return values.ensure;
       },
       async openKnown(input, options) {
         calls.open.push(input);
@@ -121,7 +132,7 @@ function fixture(overrides: Partial<AgentControlSession> = {}): { agent: AgentCo
         return makeSession();
       },
     },
-    presenter:{async ensure(input,options){calls.ensure.push({selector:input.selector});if(options?.signal)calls.signals.push(options.signal);if(input.prepareEmbedded)calls.prepare.push({streamId:STREAM_ID});calls.closes++;return Object.freeze({result:ENSURE,...(input.prepareEmbedded?{prepared:Object.freeze({ok:true as const,value:Object.freeze({streamId:STREAM_ID,expiresAt:60})})}:{})});}},
+    presenter:{async ensure(input,options){calls.ensure.push({selector:input.selector});if(options?.signal)calls.signals.push(options.signal);if(input.prepareEmbedded)calls.prepare.push({streamId:STREAM_ID});calls.closes++;return Object.freeze({result:values.ensure,...(input.prepareEmbedded?{prepared:Object.freeze({ok:true as const,value:Object.freeze({streamId:STREAM_ID,expiresAt:60})})}:{})});}},
   };
 }
 async function connect(agent: AgentControl,presenter:AgentPresentation, revision = "2025-11-25",apps=false): Promise<{
@@ -200,6 +211,7 @@ await test("four tools map exact arguments, wait default, original signals, and 
 
 await test("a pending ensure clears old projection and out-of-order completion cannot replace the newest projection",async()=>{const value=fixture(),connection=await connect(value.agent,value.presenter,"2025-11-25",true),selector={kind:"known" as const,deviceRef:DEVICE};await connection.client.callTool({name:"fsq_viewer_ensure",arguments:{selector}});const projected=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"});assert.deepEqual(projected.contents[0]?._meta?.ui,{prefersBorder:true,csp:{connectDomains:["http://127.0.0.1:49152","ws://127.0.0.1:49152"],resourceDomains:["http://127.0.0.1:49152"]}});const resolvers:Array<(value:AgentPresentationResult)=>void>=[];value.presenter.ensure=async()=>new Promise(resolve=>resolvers.push(resolve));const first=connection.client.callTool({name:"fsq_viewer_ensure",arguments:{selector}});await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(resolvers.length,1);const whilePending=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"});assert.deepEqual(whilePending.contents[0]?._meta?.ui,{prefersBorder:true,csp:{connectDomains:[],resourceDomains:[]}});const second=connection.client.callTool({name:"fsq_viewer_ensure",arguments:{selector}});await new Promise<void>(resolve=>setImmediate(resolve));assert.equal(resolvers.length,2);const firstStream="523e4567-e89b-42d3-a456-426614174000",secondStream="623e4567-e89b-42d3-a456-426614174000",firstResult=ensureAt(firstStream,49153),secondResult=ensureAt(secondStream,49154);resolvers[1]!({result:secondResult,prepared:{ok:true,value:{streamId:secondStream,expiresAt:60}}});await second;const newest=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"});assert.deepEqual(newest.contents[0]?._meta?.ui,{prefersBorder:true,csp:{connectDomains:["http://127.0.0.1:49154","ws://127.0.0.1:49154"],resourceDomains:["http://127.0.0.1:49154"]}});resolvers[0]!({result:firstResult,prepared:{ok:true,value:{streamId:firstStream,expiresAt:60}}});await first;const afterOld=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"});assert.deepEqual(afterOld.contents[0]?._meta?.ui,newest.contents[0]?._meta?.ui);await connection.close();});
 await test("Apps capability prepares one private presentation and publishes exact Runtime CSP",async()=>{const value=fixture(),connection=await connect(value.agent,value.presenter,"2025-11-25",true);const ensured=await connection.client.callTool({name:"fsq_viewer_ensure",arguments:{selector:{kind:"known",deviceRef:DEVICE}}});assert.deepEqual(dto(ensured),ENSURE);assert.deepEqual(value.calls.prepare,[{streamId:STREAM_ID}]);assert.deepEqual(value.calls.open,[]);assert.equal(value.calls.closes,1);const resource=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"}),ui=resource.contents[0]?._meta?.ui;assert.deepEqual(ui,{prefersBorder:true,csp:{connectDomains:["http://127.0.0.1:49152","ws://127.0.0.1:49152"],resourceDomains:["http://127.0.0.1:49152"]}});await connection.close();});
+await test("iOS uses the same four tools and remains standalone fallback with Apps capability",async()=>{const value=fixture({}, {ensure:IOS_ENSURE,inspect:IOS_INSPECT,snapshot:IOS_SNAPSHOT}),connection=await connect(value.agent,value.presenter,"2025-11-25",true);const ensured=await connection.client.callTool({name:"fsq_viewer_ensure",arguments:{selector:{kind:"auto",platform:"ios"}}});assert.deepEqual(dto(ensured),IOS_ENSURE);assert.deepEqual(value.calls.ensure,[{selector:{kind:"auto",platform:"ios"}}]);assert.deepEqual(value.calls.prepare,[]);const resource=await connection.client.readResource({uri:"ui://fsq-scrcpy/viewer-v1"});assert.deepEqual(resource.contents[0]?._meta?.ui,{prefersBorder:true,csp:{connectDomains:[],resourceDomains:[]}});const inspected=await connection.client.callTool({name:"fsq_stream_inspect",arguments:{deviceRef:IOS_DEVICE,streamId:STREAM_ID,afterRevision:1}}),waited=await connection.client.callTool({name:"fsq_stream_wait",arguments:{deviceRef:IOS_DEVICE,streamId:STREAM_ID,afterRevision:1,waitMs:0}}),stopped=await connection.client.callTool({name:"fsq_stream_stop",arguments:{deviceRef:IOS_DEVICE,streamId:STREAM_ID,expectedRevision:1}});assert.deepEqual(dto(inspected),IOS_INSPECT);assert.deepEqual(dto(waited),IOS_INSPECT);assert.deepEqual(dto(stopped),{ok:true,value:{snapshot:IOS_SNAPSHOT}});assert.deepEqual(value.calls.open,[{deviceRef:IOS_DEVICE},{deviceRef:IOS_DEVICE},{deviceRef:IOS_DEVICE}]);assert.deepEqual(value.calls.wait,[{streamId:STREAM_ID,afterRevision:1,waitMs:0}]);await connection.close();});
 
 await test("MCP wait accepts the exact endpoints and rejects values outside 0..25000", async () => {
   for (const waitMs of [0, 25_000]) {
@@ -230,7 +242,7 @@ await test("strict schemas reject aliases, coercion, extra fields, wrong identit
   const invalid: readonly Record<string, unknown>[] = [
     {},
     { deviceRef: DEVICE_ID, streamId: STREAM_ID },
-    { deviceRef: { ...DEVICE, platform: "ios" }, streamId: STREAM_ID },
+    { deviceRef: { ...DEVICE, platform: "windows" }, streamId: STREAM_ID },
     { deviceRef: { ...DEVICE, privateCredential: "secret" }, streamId: STREAM_ID },
     { deviceRef: DEVICE, streamId: STREAM_ID.toUpperCase() },
     { deviceRef: DEVICE, streamId: STREAM_ID, afterRevision: "1" },

@@ -126,6 +126,14 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - CLI 新增 `viewer ensure --platform ios` 与 `local-state status --platform ios`；stored-identity 命令在两个本机 slot 中选择唯一 matching opaqueId 或唯一 live/ready identity，多候选 fail closed 为 `device-ambiguous`。iOS 不增加 reset/rebind。
 - stop stream、Viewer close 与 Runtime shutdown 只释放 FSQ 资源，不停止、修复或重配 WDA、forward、Appium Session 或自动化；不声明物理 iPhone 关联、MCP、embedded Viewer、多 iPhone slot 或平台支持。
 
+## macOS iOS MCP Parity Contract
+
+- `MCP-PARITY-MACOS-IOS-13` 固定为 macOS 26.7.1 build 25G241 arm64、VS Code Stable 1.144.0 arm64 build `2c33b50b16c472efe58357d1d2a8a5414bc23fbf`、local stdio MCP、standalone Chrome 155.0.8059.85、真实 iPhone、外部 owner-run WDA v16.15.3 与 fixed `127.0.0.1:9100` forward；不建立平台或其他 Host 支持声明。
+- 既有 `fsq-scrcpy-mcp` 四工具 clean cut 接受 provider-neutral Android/iOS `DeviceRef` 及 `selector:auto/android|ios`，复用 unchanged AgentControl、RuntimeControl safe DTO、tool name/result/error、legacy/modern revision、cancel/EOF/timeout/response-loss 与 close-once 语义；不新增 iOS tool、alias、flag 或 wrapper。
+- 本 Feature 的 iOS ensure 只返回受保护 standalone Viewer URL。即使 Host 支持 MCP Apps，Integrations 也不得为 iOS selector prepare embedded admission；既有 App resource保持 empty-domain fallback shell并只通过 `ui/open-link` 打开同一 standalone URL。Android embedded Viewer行为不变，iOS embedded Viewer仍需独立 Feature。
+- Contracts、Runtime、Capture、Viewer、依赖与 lock no-delta。MCP/stdout/stderr/transcript/model context不得含媒体、endpoint、UDID、Session、provider locator、authority、credential、cookie、Origin或raw cause；stop/Runtime shutdown只释放FSQ资源，外部WDA/forward/自动化继续存活。
+
+
 ## macOS Android RuntimeControl v1
 
 本节最初定义 `ANDROID-RUNTIME-CONTROL-MACOS-02`；下方已确认的`ANDROID-CONTROL-WAIT-MACOS-04`只扩展ordinary provider wait。CLI wait/watch、Windows、iOS RuntimeControl与Model Context Protocol仍未启用。

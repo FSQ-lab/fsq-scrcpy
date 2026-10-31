@@ -230,3 +230,13 @@ AgentControlSession.close() -> Promise<void>
 - target Host exact为VS Code Stable 1.144.0 arm64 build`2c33b50b16c472efe58357d1d2a8a5414bc23fbf`、macOS 26.7.1 build25G241、local stdio MCP、Apps`2026-01-26`。它是Feature验收目标而非已验证entry；通过前verified Host register仍为空。
 - installed pack验收覆盖MIME capability、UI handshake、model-only visibility与App call拒绝、tool-result-before-resource-read、early/prepare-failure fallback shell、resource CSP、ensure embedded UI、unsupported/LNA/connect/App内fallback、invalid/unknown tool、0/25000 wait、cancel/EOF/restart/response loss、single-Viewer race、rotation/visibility/grace/socket-close terminal/stop/new StreamId/owner cleanup及raw stdout/stderr/transcript/privacy。
 - Host或Android真实表面不可用时记录external evidence gap并保持Issue open；fixture、official client或Chrome standalone不能替代VS Code embedded UI。通过后只登记上述exact tuple；任何VS Code build、Apps protocol、SDK、Runtime feature tuple或security behavior变化置为`revalidation-required`。
+
+## macOS iOS MCP Parity
+
+本节定义 `MCP-PARITY-MACOS-IOS-13` 的 Integrations clean cut；Root 固定 exact Host/device tuple。Contracts、Runtime、Capture、Viewer、依赖与 lock no-delta。
+
+- 四个tool name、result、error、`content`/`structuredContent` mirror、stdio lifecycle及AgentControl接口不变。共享strict schema中的`DeviceRef.platform`改为exact`android|ios`，auto selector改为exact`{kind:"auto",platform:"android"|"ios"}`；known selector及inspect/wait/stop接受完整Android/iOS DeviceRef。未知platform、platform/namespace/identity不一致、额外字段与旧shape仍fail closed。
+- handler仅从已验证selector判定presentation eligibility：Android且Host协商exact Apps MIME时沿用`prepareEmbeddedViewer`；iOS无论Host capability均以`prepareEmbedded:false`调用同一AgentPresentation。iOS普通safe result和standalone URL byte shape不变，resource projection保持empty-domain fallback shell，App只能用official`ui/open-link`打开该URL；不得尝试bind、Worker、WebSocket或Capture allocation。
+- exact VS Code验收必须覆盖同一四工具的iOS auto/known ensure、inspect、0/25000 wait、stop、新StreamId、Runtime restart/owner shutdown、cancel/EOF/response-loss、standalone Chrome fresh Live及外部WDA/forward存活；Android official-client、installed package与MCP App回归必须无变化。
+- stdout/stderr/transcript/model context及普通DTO禁止media、endpoint、UDID、Session、provider locator、authority、credential、cookie、Origin、raw cause或stack。通过只验收本exact Host的iOS standalone parity，不激活iOS embedded Viewer、physical identity、跨仓Appium seam或平台支持矩阵。
+
