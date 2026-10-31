@@ -80,7 +80,7 @@ Contract tests须覆盖实际pack/install/bin/shebang、全部syntax边界、hum
 
 本节定义用户已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` clean cutover对既有调用方的窄增量；下方04B在不改变provider值的前提下新增CLI wait/watch。
 
-- `viewer ensure`组合Contracts safe DTO，attachment中的`RuntimeInstance.features`为exact `["wait-v1","auto-bootstrap-v1"]`；`stream inspect`原样返回observation且`timedOut:false`。
+- `viewer ensure`组合Contracts safe DTO，attachment中的`RuntimeInstance.features`当前为exact `["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`；`stream inspect`原样返回observation且`timedOut:false`。
 - Integrations validator/fixture/contract tests一次迁移，证明新tuple与四字段inspect精确、旧/额外feature拒绝；其他命令结果与隐私边界no-delta。
 
 ## macOS Android CLI Wait/Watch
@@ -203,6 +203,30 @@ AgentControlSession.close() -> Promise<void>
 - 四个MCP tool name/schema/result、dual projection、legacy五revision、modern pin、stdio lifecycle/cancel/EOF和Host-neutral边界完全不变。`fsq_viewer_ensure`沿用同一AgentControl ensure；Runtime内部自动arm，AgentControl不接触permit/cookie或新增字段。
 - CLI-only Agent `viewer ensure ... --json`获得相同zero-code行为。clean-cut删除`viewer approve --code` grammar、mapping、prompt/result/tests和Runtime owner-local approve seam；任何旧approve形式在product I/O前deterministic `invalid-cli-syntax`。
 - status、shutdown、reset/rebind、inspect/wait/watch/stop行为不变；owner authority仍只用于shutdown/maintenance，MCP/ordinaryCLI不新增owner、device control或Appium authority。
-- Runtime/fixture feature tuple同步迁移为exact `['wait-v1','auto-bootstrap-v1']`；旧tuple fail closed。MCP/CLI output、URL、stderr、log、argv/env不得含permit、claim/media cookie、grant、pairing code/id或Runtime locator。
+- Runtime/fixture feature tuple同步迁移为exact `['wait-v1','auto-bootstrap-v1','mcp-app-v1']`；旧tuple fail closed。MCP/CLI output、URL、stderr、log、argv/env不得含permit、claim/media cookie、grant、pairing code/id或Runtime locator。
 - installed package验收以同一pack/bin分别执行CLI、一个listed legacy和exact modern链：ensure后无需approve即能由本机用户打开真实Chrome并达fresh Live；覆盖fresh/reattach、response-loss same StreamId、TTL/race/rollback、refresh/grace、stop/new StreamId、Runtime restart和cleanup。official-client自动证据继续不生成verified Host entry。
 - Capture、dependency/lock及11A SDK选择no-delta；若package/lock变化停止并重新进入依赖批准门槛。
+## VS Code MCP App Presentation Adapter
+
+本节定义 `ANDROID-MCP-VIEWER-04` 的 Integrations delta；目标只为Root固定的exact VS Code tuple。
+
+### Dependency, capability and unchanged model tools
+
+- 新增生产依赖exact `@modelcontextprotocol/ext-apps@2.0.3`与Root固定integrity；server/client/zod版本保持，React peer不安装。package metadata为MIT；distributed LICENSE为Apache-2.0/MIT transition且非spec文档含CC-BY-4.0。lock与实际bundled files必须完成registry/SRI/provenance/advisory/SBOM/LICENSE/NOTICE闭环后才能Ready。
+- 四个模型可见tool name/input schema、safe`content`/`structuredContent` result、`isError`、legacy revisions、modern pin、cancel/EOF/signal和CLI JSON fallback不变。`fsq_viewer_ensure`仅增加标准`_meta.ui.resourceUri='ui://fsq-scrcpy/viewer-v1'`与`visibility:['model']`；其他三工具无UI metadata，App侧`tools/call fsq_viewer_ensure`必须由Host拒绝。
+- 每个McpServer初始化后用official`getUiCapability`读取`capabilities.extensions['io.modelcontextprotocol/ui'].mimeTypes`，只要求exact包含`text/html;profile=mcp-app`。App↔Host UI handshake由ext-apps 2.0.3 pin到`2026-01-26`；VS Code product/build是验收identity而非capability字段。无extension/MIME的legacy或modern client不prepare，ensure原样返回standalone URL。
+- `CallToolResult._meta`不得含credential、permit、cookie、Origin、Runtime locator或media；raw stdio仍满足既有privacy断言。标准UI linkage metadata只在tools/list，ordinary safe result`R` byte-for-byte不变。
+
+### Deep presentation seam and resource ownership
+
+- Integrations-internal`AgentPresentation`深模块在一个acquire/session内执行existing ensure、strict safe validation及可选`prepareEmbeddedViewer`，返回`{result:R,presentation?:{streamId,origin,expiresAt}}`；presentation值全为safe既有identity/origin且只驱动resource/CSP，不并入R。CLI继续用既有AgentControl；inspect/wait/stop不进入此seam。
+- capability absent时不prepare且Host保持ordinary tool text。capability present但prepare返回任一fixed failure时仍返回R且presentation缺失；随后的resource read返回无外联fallback shell，不把presentation failure替换成模型可见error。pre-linearization cancel不prepare；post-ensure cancel/prepare response loss沿用各自state-unknown并允许same ensure/prepare重试，不滑动deadline。
+- 每个server实例最多保留一个不可授权的current resource projection。`resources/read`始终返回bounded App shell：prepare success已linearize时附exact Runtime CSP；early read、无projection或prepare failure时返回empty-domain fallback shell并且该document不再升级为embedded。exact VS Code正常顺序仍须证明tool-result-before-read；并发ensure替换projection时，App以自身tool result校验StreamId/origin，stale/mismatched shell无授权力且只能fallback。
+- `AgentPresentation`不复制deadline/terminal/claim状态；Runtime`ViewerAuthorization`是唯一authority。server close/EOF只清projection且不stop stream；stale/expired projection即使生成HTML，任何bind仍由Runtime权威拒绝。resource read不访问ADB/Capture、不延长deadline。
+- resource使用official`registerAppResource`，tool使用`registerAppTool`；HTML/worker均来自现有Viewer build manifest并校验name/hash/MIME/byte cap，禁止动态模板注入、文件路径或任意asset读取。资源响应不含DeviceRef、credential、provider或媒体。
+
+### Exact Host and acceptance
+
+- target Host exact为VS Code Stable 1.144.0 arm64 build`2c33b50b16c472efe58357d1d2a8a5414bc23fbf`、macOS 26.7.1 build25G241、local stdio MCP、Apps`2026-01-26`。它是Feature验收目标而非已验证entry；通过前verified Host register仍为空。
+- installed pack验收覆盖MIME capability、UI handshake、model-only visibility与App call拒绝、tool-result-before-resource-read、early/prepare-failure fallback shell、resource CSP、ensure embedded UI、unsupported/LNA/connect/App内fallback、invalid/unknown tool、0/25000 wait、cancel/EOF/restart/response loss、single-Viewer race、rotation/visibility/grace/socket-close terminal/stop/new StreamId/owner cleanup及raw stdout/stderr/transcript/privacy。
+- Host或Android真实表面不可用时记录external evidence gap并保持Issue open；fixture、official client或Chrome standalone不能替代VS Code embedded UI。通过后只登记上述exact tuple；任何VS Code build、Apps protocol、SDK、Runtime feature tuple或security behavior变化置为`revalidation-required`。

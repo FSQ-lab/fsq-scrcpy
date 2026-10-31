@@ -128,7 +128,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 - `ControlVersion`恰好为 `{major:1,minor:0}`；与Contracts `contractVersion:2`和FSQV media版本独立。`RuntimeTarget`恰好为 `{instanceId,generation}`，两者都是canonical non-nil RFC4122 variant-1/version-4 UUID。
 - `DeviceSelector`恰好为 `{kind:"auto",platform:"android"|"ios"}` 或 `{kind:"known",deviceRef:DeviceRef}`；额外字段、未知platform和错误prototype拒绝。auto允许为所选平台首次生成或复用安全DeviceRef；known接受已验证的 Android/iOS DeviceRef，且从不生成、重映射或修改identity。
-- `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:["wait-v1","auto-bootstrap-v1"]}`；feature tuple deep-frozen且不接受空/旧/额外/重复/未知/乱序值。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
+- `RuntimeInstance`恰好为 `{controlVersion,instanceId,generation,contractVersion:2,deviceRef,features:["wait-v1","auto-bootstrap-v1","mcp-app-v1"]}`；feature tuple deep-frozen且不接受空/旧/额外/重复/未知/乱序值。`RuntimeAttachment`恰好为 `{disposition:"started"|"attached",instance}`；`AcquireRuntimeRequest`恰好为 `{mode:"attach-only"|"start-or-attach",selector}`；serialized `AcquireRuntimeValue`恰好为 `{attachment}`。
 - `HelloControlValue`恰好为 `{instance:RuntimeInstance}`。`EnsureViewerValue`恰好为 `{deviceRef,descriptor:ViewerDescriptor,snapshot:StreamSnapshot}`。`InspectControlValue`恰好为 `{snapshot,changes,reset,timedOut}`。`StopStreamValue`恰好为 `{snapshot}`。owner-only `ShutdownRuntimeValue`恰好为 `{instanceId,generation}`。
 - `ControlWireValue`只包含本节列出的plain serialized values。generic `ControlResult<T extends ControlWireValue>`恰好为 `{ok:true,value:T}|{ok:false,error:ControlError}`。只有stop expectedRevision mismatch使用 `{ok:false,error:RevisionConflictError,snapshot:StreamSnapshot}`；任何其他失败禁止`snapshot`。
 - `RuntimeControlSession`、control/owner methods、`AbortSignal`、socket、credential、permit、claim/media cookie及provider object不是`ControlWireValue`，不得传给generic serializer。Runtime本地成功acquire类型必须使用独立的`{ok:true,session:RuntimeControlSession}`分支。
@@ -139,7 +139,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 - control request/response body使用`CanonicalControlJson`：UTF-8、无BOM、无前后空白、无insignificant whitespace、一个top-level object、无duplicate key。只接受ordinary object或null-prototype object；拒绝array作为top level、非finite/coerced/exponent/negative-zero number、错误prototype、accessor、symbol和额外字段。
 - encoder等价于对已严格验证且按下列固定key order构造的plain DTO执行ECMAScript `JSON.stringify`，再以UTF-8编码。client发送的bytes经strict parse和相同encoder重新编码后必须逐byte相等；否则为`malformed-control`。`Content-Length`、12KiB changes与16KiB body limit均只计body的实际UTF-8 octets，不计headers。
 - 固定nested key order为：`ControlVersion: major,minor`；`RuntimeTarget: instanceId,generation`；`DeviceRef: contractVersion,platform,namespace,opaqueId`；`RuntimeInstance: controlVersion,instanceId,generation,contractVersion,deviceRef,features`；`RuntimeAttachment: disposition,instance`；`ControlError: controlVersion,code,disposition,operationState,safeMessage`；`RevisionConflictError`同顺序并以`code`置于`controlVersion`后。`ViewerDescriptor`、`StreamSnapshot`及其nested `Size`沿用Contracts v2声明的field order；合法optional field缺失时省略，wire request中下文声明为nullable的field必须出现且使用`null`，不得省略。
-- top-level result key order恰好为success `ok,value`、ordinary failure `ok,error`、revision conflict `ok,error,snapshot`。array保持语义顺序；`features`恰好为`["wait-v1","auto-bootstrap-v1"]`；InspectControlValue固定order为`snapshot,changes,reset,timedOut`。
+- top-level result key order恰好为success `ok,value`、ordinary failure `ok,error`、revision conflict `ok,error,snapshot`。array保持语义顺序；`features`恰好为`["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`；InspectControlValue固定order为`snapshot,changes,reset,timedOut`。
 - Inspect/wait normalizer最多16个`changes`，canonical `changes` array最多12288 bytes，完整canonical response body最多16384 bytes。任一cap超出不得切prefix，改为`{snapshot:current,changes:[],reset:true,timedOut:false}`；fallback仍超16384时返回runtime-overload。边界值16、12288和16384允许，任一超过1即不允许。
 
 ### Exact control errors
@@ -171,11 +171,11 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 ## RuntimeControl Bounded Wait v1
 
-本节定义已确认的 `ANDROID-CONTROL-WAIT-MACOS-04` Contracts基础；11B clean cut后`features:["wait-v1","auto-bootstrap-v1"]`与四字段inspect/wait共同构成active契约。
+本节bounded-wait值与当前`features:["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`及四字段inspect/wait共同构成active契约。
 
 ### Exact values and feature cutover
 
-- `ControlVersion`保持exact `{major:1,minor:0}`。`RuntimeInstance.features`为deep-frozen exact tuple `["wait-v1","auto-bootstrap-v1"]`；旧`["wait-v1"]`、空、额外、重复、未知或乱序全部拒绝，不保留alias/shim/fallback。新client对旧Runtime返回`control-version-mismatch`，不得轮询降级、kill或替换；owner显式shutdown/restart是唯一cutover路径。
+- `ControlVersion`保持exact `{major:1,minor:0}`。`RuntimeInstance.features`当前为deep-frozen exact tuple `["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`；旧tuple、空、额外、重复、未知或乱序全部拒绝，不保留alias/shim/fallback。新client对旧Runtime返回`control-version-mismatch`，不得轮询降级、kill或替换；owner显式shutdown/restart是唯一cutover路径。
 - `InspectControlValue` clean cutover为exact `{snapshot,changes,reset,timedOut}`，固定key order同此顺序。inspect成功总是`timedOut:false`；wait的change/reset/terminal成功也为false。`reset:true`要求`changes=[] && timedOut:false`；`timedOut:true`要求`changes=[] && reset:false`；非空changes要求两者均false。
 - ordinary `RuntimeControl`在inspect与stopStream之间新增`wait({streamId,afterRevision,waitMs},{signal?}) -> Promise<ControlResult<InspectControlValue>>`。input为exact plain readonly三字段；afterRevision为正safe integer，waitMs为`0..30000` safe integer；拒绝negative-zero、coercion、fraction、额外字段。AbortSignal仍仅local且不序列化；session enumeration/JSON/inspect及owner authority边界不变。
 
@@ -190,7 +190,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 ### Required contract verification
 
-- Clean cutover覆盖`["wait-v1","auto-bootstrap-v1"]`与旧/额外feature拒绝、四字段exact validator/canonical round-trip、wait request order、0/30000及非法边界、current/older/future/reset/terminal/timeout互斥、16/17 changes、12288/16384±1 bytes和无prefix fallback。
+- Clean cutover覆盖`["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`与旧/额外feature拒绝、四字段exact validator/canonical round-trip、wait request order、0/30000及非法边界、current/older/future/reset/terminal/timeout互斥、16/17 changes、12288/16384±1 bytes和无prefix fallback。
 - RuntimeControlSession必须证明wait仅在control prototype、serialized session仍只有attachment、close/cancel只结束wait且不改变stream/Runtime。Integrations调用方输出exact新feature tuple与四字段inspect；Capture/Viewer serialized产品面无额外字段。
 
 ## Agent Auto-Bootstrap Contract
@@ -201,7 +201,7 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 - `ViewerDescriptor` serialized shape、canonical key order及URI规则不变；`expiresAt`改为当前 auto-bootstrap permit 的wall-clock描述，不能延长30000ms monotonic deadline，也不是bearer。
 - serialized `EnsureViewerValue`仍恰为 `{deviceRef,descriptor,snapshot}`，因此 AgentControl、MCP四工具和CLI ensure result shape不变。
-- `RuntimeInstance.features` clean cut为deep-frozen exact tuple `['wait-v1','auto-bootstrap-v1']`。旧`['wait-v1']`、空、缺失、额外、重复、未知或乱序tuple均为`control-version-mismatch`；不保留feature alias、fallback或upgrade shim。
+- `RuntimeInstance.features`当前clean cut为deep-frozen exact tuple `['wait-v1','auto-bootstrap-v1','mcp-app-v1']`。旧tuple、空、缺失、额外、重复、未知或乱序tuple均为`control-version-mismatch`；不保留feature alias、fallback或upgrade shim。
 - `DeviceRef`、StreamId、StreamSnapshot、ViewerDescriptor、ControlVersion、RuntimeTarget、RuntimeAttachment、Inspect/Wait/Stop/Shutdown values及媒体契约no-delta。
 
 ### Removed authority and error surface
@@ -216,3 +216,12 @@ Phases are `demand-pending`, `starting-capture`, `syncing`, `streaming`, `grace`
 
 - Contracts验收覆盖exact feature tuple/canonical round-trip与旧tuple拒绝；removed exports/types/validators不可导入或反射；ensure/descriptor shape不变且不含secret；ControlError unauthorized拒绝而browser/StreamError unauthorized继续有效。
 - 所有生产调用方、fixture和测试必须同批迁移；任何兼容re-export、deprecated alias、optional旧字段或双validator均失败。
+## MCP App Viewer Contract
+
+本节定义 `ANDROID-MCP-VIEWER-04` 的共享值边界。
+
+- `RuntimeInstance.features` clean cut为deep-frozen exact tuple `['wait-v1','auto-bootstrap-v1','mcp-app-v1']`。旧二项tuple、空/缺失/额外/重复/未知/乱序全部为`control-version-mismatch`，不保留alias、fallback或upgrade shim。
+- `DeviceRef`、ViewerDescriptor、StreamSnapshot、EnsureViewerValue、Inspect/Wait/Stop、四个MCP input/output schema、compact text mirror与canonical order no-delta。模型可见success/failure不增加embedded、Host、Origin、CSP、resource URI、permit、cookie、capability或presentation字段。
+- MCP Apps标准`_meta.ui.resourceUri`与`resources/read`是presentation metadata，不属于Contracts DTO；其值不得进入Contracts validator/canonical encoder。`CallToolResult._meta`同样不得携带credential、cookie、permit、authority或媒体。
+- Runtime的embedded prepare/bind是Runtime-owned受保护本机接口，不加入`ControlWireValue`、ordinary `ControlResult` generic union或公共跨项目契约。它可复用真正适用的既有ControlError，并拥有不导出的fixed `PresentationUnavailableError`；所有成功值必须secret-free。Browser Origin只在Runtime授权状态内保存，不进入snapshot、error、history或普通序列化。
+- Contracts验收覆盖新exact feature tuple/canonical round-trip与旧tuple拒绝，并证明所有既有safe DTO byte-for-byte不变、无presentation/private字段；Capture与跨项目`Appium_connect_agent` seam no-delta。

@@ -321,7 +321,7 @@ Node.js 24.22.1 LTS is the external prerequisite. Production direct dependencies
 | `POST /v1/stream/stop` | client | `{controlVersion,target,streamId,expectedRevision:null|positiveSafeInteger}` | HTTP 200 `ControlResult<StopStreamValue>`；revision mismatch HTTP 409 exact snapshot-bearing branch |
 | `POST /v1/runtime/shutdown` | owner | `{controlVersion,target}` | HTTP 200 `ControlResult<ShutdownRuntimeValue>`后按shutdown顺序exit |
 
-- hello严格核对identity/version；features恰好`["wait-v1","auto-bootstrap-v1"]`，旧/缺失tuple为control-version-mismatch且无fallback。
+- hello严格核对identity/version；features恰好`["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`，旧/缺失tuple为control-version-mismatch且无fallback。
 - every non-hello request携带RuntimeTarget并在dispatch前重核。route operation errors：hello既有集合；ensure无application unauthorized；inspect/wait不含unauthorized；stop另含revision-conflict；shutdown无unauthorized application branch。transport/lifecycle仍可deadline-exceeded或runtime-exited。
 - authenticated application failure使用Contracts表HTTP status与canonical `ControlResult`；revision-conflict使用其唯一branch。unknown authenticated route为404 `{"error":"not-found"}`；wrong method或OPTIONS为405 `{"error":"method-not-allowed"}`。所有body response固定`Content-Type: application/json; charset=utf-8`、exact decimal Content-Length、`Cache-Control: no-store`、`X-Content-Type-Options: nosniff`；不发送CORS、redirect或authority echo。
 - `Content-Type`必须exact `application/json; charset=utf-8`；恰好一个canonical decimal Content-Length，值与bytes相同且0..16384；拒绝Transfer-Encoding。wrong content type为415 `{"error":"unsupported-media-type"}`；missing/duplicate/invalid length、premature EOF、noncanonical body为400，oversize为413。header/body deadline在仍可写时为408 `{"error":"request-timeout"}`，否则destroy。transport error JSON同样canonical和fixed safe，不含ControlError identity evidence。
@@ -432,7 +432,7 @@ Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout�
 
 ### Provider, Host and client bounds
 
-- `RuntimeControlProvider`将features固定为`["wait-v1","auto-bootstrap-v1"]`，inspect/wait复用同一response normalizer。StateStore wait bounds不变。
+- `RuntimeControlProvider`将features固定为`["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`，inspect/wait复用同一response normalizer。StateStore wait bounds不变。
 - Host新增`/v1/stream/wait`与wait admission ledger。现有上限保持：8 pre-auth、8 authenticated connections、8 total in-flight、每socket一个in-flight、每socket64 requests；wait同时占authenticated/in-flight且全局最多4。第5个wait返回HTTP429 canonical runtime-overload且零wait allocation；`ControlAdmissionSnapshot` exact增加`waits`用于cleanup验证。
 - 每个local `HttpRuntimeControl`最多一个active wait；同client第二个在开socket前local runtime-overload。session `close()/asyncDispose`标记closed、取消并等待pending wait、destroy自己的keep-alive sockets；pending wait返回local request-cancelled，stream/Runtime及其他session不受影响；close后调用仍runtime-exited。
 - Client/server不把wait加入mutating集合。Caller AbortSignal即使request已发送仍为request-cancelled，因为wait只读且registration已清理；真正transport hard deadline/response loss才是deadline-exceeded。peer/socket close只取消对应wait。
@@ -479,7 +479,7 @@ Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout�
 ### Ensure, owner authority and cleanup clean cut
 
 - trusted in-process ensure success clean cut为`{descriptor,snapshot}`，不返回ViewerAccess；既有idempotencyKey/device binding/record retention保持。control ensure serialized value仍为`{deviceRef,descriptor,snapshot}`。
-- `RuntimeInstance.features`改为`['wait-v1','auto-bootstrap-v1']`。clean-cut删除`POST /v1/viewer/approve`、RuntimeOwnerControl/owner-local approve method、ViewerGrant coordinator字段及application ControlError unauthorized；owner bearer只保留shutdown和maintenance，ordinary bearer访问owner route仍401。
+- `RuntimeInstance.features`当前为`['wait-v1','auto-bootstrap-v1','mcp-app-v1']`。clean-cut删除`POST /v1/viewer/approve`、RuntimeOwnerControl/owner-local approve method、ViewerGrant coordinator字段及application ControlError unauthorized；owner bearer只保留shutdown和maintenance，ordinary bearer访问owner route仍401。
 - stop、device failure、Runtime shutdown、generation replacement和policy violation在统一终止前revoke permit、claim/media cookie、pending delivery及raw wrappers；cleanup failure不覆盖first terminal cause。lost stop仍inspect原StreamId；Adapter不自动重试mutation。
 - secret原值仅存non-enumerable/redacted wrapper并尽可能只留context-bound digest；permit/cookie/grant/credential不得进入Agent/model/MCP/CLI/URI/log/argv/env/persistence。授权/session各阶段在authenticated visible demand前`Capture.open=0`。
 
@@ -488,3 +488,38 @@ Runtime scoped tests必须覆盖status零写、live/refused/wrong-auth/timeout�
 - deterministic测试覆盖30000ms deadline-1/exact/late callback、wall jump、所有pending/delivering/session-issued expiry/DELETE、repeat/concurrent ensure、expired re-arm、pre/post-linearization cancel、stop/generation ABA、first-browser race、HTML/session finish/rollback、valid/stale cookie reload、refresh/grace/revoke和每条cleanup counter。
 - HTTP测试覆盖native/user-activated navigation、Host/Origin/Fetch-User/Site/Mode/Dest、iframe/prefetch/prerender、cookie组合/duplicate/stale clearing、404/401/409/429及removed route零可达。
 - 真实macOS Android入口由installed CLI、一个legacy和modern MCP链分别完成zero-code fresh/reattach ensure、first fresh Live、rotation/quality、response loss、TTL/rollback、refresh/grace、stop/new StreamId、restart旧claim失效、owner shutdown、privacy及global ADB/device settings存活；verified Host register保持空。
+## VS Code MCP App Embedded Viewer
+
+本节定义 `ANDROID-MCP-VIEWER-04` 的 Runtime delta；现有standalone auto-bootstrap、single-Viewer、媒体、freshness、统一终止及“同一embedded socket内”的visibility/grace保持，所有新增状态仍由唯一`ViewerAuthorization`深模块和StateStore mutex拥有。
+
+### Protected prepare and first-claim state
+
+- ordinary authenticated RuntimeControl新增受保护方法`prepareEmbeddedViewer({streamId},{signal?})`，仅供trusted Integrations MCP presentation Adapter使用。wire route为client-authority `POST /v1/viewer/embedded/prepare`，canonical request exact `{controlVersion,target,streamId}`；它不属于模型可见AgentControl/Contracts DTO。
+- Runtime-owned `PresentationUnavailableError` exact为`{controlVersion:{major:1,minor:0},code:"presentation-unavailable",disposition:"terminal",operationState:"not-applied",safeMessage:"Embedded Viewer is unavailable."}`，HTTP 409；它不导出到Contracts或ordinary result。`PrepareEmbeddedResult` exact为`{ok:true,value:{streamId,expiresAt}}|{ok:false,error:ControlError|PresentationUnavailableError}`，nested key order同此声明，完整canonical JSON≤16384 bytes。success HTTP 200；真正target/generation identity mismatch继续用`instance-conflict`，transport/version/framing/overload/response-loss沿用既有适用ControlError，pre-send cancel为local request-cancelled/not-applied。
+- prepare只在当前generation/StreamId nonterminal、standalone authorization为armed且permit尚未到期时建立`embedded-armed`；成功不含token、Origin、port、credential或raw state。repeated/concurrent prepare复用同一embedded identity/deadline且不滑动；claimed/session-issued/connected/grace、terminal、unknown/wrong stream或`now>=deadline`为`presentation-unavailable`，不得谎报identity mismatch。commit后response loss为deadline-exceeded/unknown，同请求重试幂等返回success。
+- embedded与standalone共用原30000ms monotonic absolute deadline。状态允许`armed+embedded-armed`并存；第一个committed standalone claim或eligible embedded Origin bind原子获胜并撤销另一admission。embedded bind一经mutex commit即权威，204 response loss不rollback；同Origin重试幂等204，其他Origin 409。terminal/expiry/stop/shutdown/generation change同步撤销两者。
+- accepted residual是已知safe standalone URI的first eligible local app/browser wins。同uid恶意进程仍在既有threat model外；不得把该residual扩张为remote、跨UID或任意web Origin admission。
+
+### Exact cross-origin route matrix
+
+下表仅覆盖列出的embedded路径；其他browser/API/asset/WS请求继续遵守既有same-origin/cookie deny-by-default条款。duplicate Host/Origin/Cookie/Authorization/Content-Length/Content-Type/Sec-Fetch/Access-Control-Request headers、任何Forwarded/Via/X-Forwarded/proxy-auth、absolute-form、wrong Host、Transfer-Encoding或unexpected body均在state allocation前拒绝；浏览器生成的Accept、Accept-Encoding、Accept-Language、User-Agent、Sec-CH-UA及Connection类常规内容协商/传输headers只受既有数量与字节cap，不作为identity或exact allowlist。
+
+| Route | Method | Origin | Fetch metadata | Cookie/Auth/body | Success/CORS |
+| --- | --- | --- | --- | --- | --- |
+| `/v1/app-sessions` | `POST` | exact `vscode-webview://[0-9a-v]{52}`；lowercase authority、无userinfo/port/path/query/fragment | `Site:cross-site, Mode:cors, Dest:empty` | cookie/auth/content-type absent，Content-Length exact `0` | commit bind then 204；`ACAO:<Origin>`,`Vary: Origin`, no credentials/expose |
+| `/v1/app-sessions` | `OPTIONS` | 同上 | `Site:cross-site, Mode:cors, Dest:empty` | no cookie/auth/body；`ACR-Method: POST`，ACR-Headers absent；legacy `ACR-Private-Network` absent或`true` | zero mutation compatibility response 204；ACAO exact、Allow-Methods POST、Max-Age 0；仅请求legacy PNA时Allow-Private-Network true；Vary列出Origin与PNA |
+| exact MCP worker asset | `GET` | exact committed bound Origin | `Site:cross-site, Mode:cors, Dest:worker` | cookie/auth/body absent | immutable bytes、ACAO exact、`Vary: Origin` |
+| `/v1/stream` embedded upgrade | `GET` upgrade | exact committed bound Origin | `Site:cross-site, Mode:websocket, Dest:empty` | cookie/auth/body absent；subprotocol exact单值`fsq-viewer.v1` | no CORS；首个socket占有slot |
+
+- Origin authority是目标build的`parentOriginHash(parentOrigin,salt)` 52-char lowercase base32 SHA-256结果，不是持久UUID salt。真实验收必须捕获browser自动发送的Origin与Fetch Metadata逐字匹配；任一值不同则该Host gate失败并先修SPEC，不得放宽为集合或wildcard。
+- target VS Code build的webview iframe permission policy包含`local-network-access`；本合同以该Host policy而非legacy PNA response作为目标LNA机制。OPTIONS只提供旧PNA兼容且不reserve/bind/延长permit；若LNA permission被Host/browser拒绝，请求可在到达Runtime前失败，已加载App必须转standalone button。POST到达后在mutex内验证deadline并直接commit exact Origin、撤销standalone；response write失败保持bound，App在原deadline内只可同Origin幂等重试。无implicit finish→upgrade时序。
+- committed bound Origin可读取当前manifest中exact MCP App worker asset；该asset仍为content-addressed immutable bytes，只对exact bound Origin返回matching CORS，不反射其他Origin、不读取任意文件。MCP resource自身携带Main/App bundle；Runtime不托管第二HTML或第二Viewer实现。
+- embedded Worker使用现有`/v1/stream`、subprotocol`fsq-viewer.v1`与同一hello/lease/ACK binary protocol，但无cookie。首个成功upgrade进入既有connected state；任何第二upgrade即使同Origin也拒绝。standalone cookie与embedded Origin两种Adapter在`ViewerAuthorization`内汇合到同一media slot，永不同时成立。
+- embedded socket存活时，hidden visible=false进入既有5秒grace，同socket在deadline前visible=true可恢复syncing→fresh Live；grace expiry terminal。socket/Worker/document关闭或error立即terminal并清bound Origin，不允许同Origin或跨document reconnect；remount/retry需authenticated ensure产生新admission/StreamId。stop/failure/shutdown释放相同socket/Capture/frame/ACK/queue资源。
+
+### Control compatibility, privacy and verification
+
+- `RuntimeInstance.features` exact改为`['wait-v1','auto-bootstrap-v1','mcp-app-v1']`。prepare route auth-first、Host/framing/body/deadline/admission与现有control listener相同；owner bearer/wrong authority 401。CLI和不支持Apps的MCP client永不调用prepare。
+- Origin、embedded flags/delivery identity不进入snapshot/history/error/log/diagnostics/persistence。MCP/stdout/URL/argv/env不含secret，因为本合同不生成embedded credential；唯一新增跨浏览器值是浏览器自动提供并只在Runtime内绑定的Origin。
+- deterministic测试覆盖prepare deadline-1/exact、private error与真正identity error、repeat/concurrent/response-loss、standalone-vs-embedded race、52-char Origin grammar、安全敏感header重复、route matrix/legacy PNA/CORS、wrong/changed Origin、asset gate、cookie/Origin混用、second Viewer、same-socket visibility/grace、socket-close terminal、terminal/generation cleanup及所有counter归零。
+- 真实exact VS Code验收必须证明browser headers、embedded fresh-paint Live、rotation、collapse/tab-hide/return、close terminal、standalone race/fallback、stop/new StreamId、restart、owner shutdown、privacy与外部ADB/device state存活；fixture不得生成verified Host entry。

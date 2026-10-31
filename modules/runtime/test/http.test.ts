@@ -26,6 +26,8 @@ async function issued() {
   await delivery!.finish();
   return { ...fixture, media:cookieToken(reply.headers["Set-Cookie"]!) };
 }
+const embeddedOrigin=`vscode-webview://${"a".repeat(52)}`;
+const embeddedRequest=(method:string,target:string,value?:string,extra:readonly(readonly[string,string])[]=[])=>( {method,target,rawHeaders:[["Host","127.0.0.1:43210"],["Origin",embeddedOrigin],["Sec-Fetch-Site","cross-site"],["Sec-Fetch-Mode","cors"],["Sec-Fetch-Dest","empty"],...(value===undefined?[]:[["Content-Type","application/json; charset=utf-8"],["Content-Length",String(Buffer.byteLength(value))]]),...extra] as readonly(readonly[string,string])[],...(value===undefined?{}:{body:body(value)})} );
 
 test("viewer claim is transactional and HTML remains secret-free",async()=>{
   const fixture=await ensured();
@@ -68,6 +70,7 @@ test("session POST requires exact body, claim cookie and browser headers",async(
     request("POST","/v1/sessions",JSON.stringify({streamId:fixture.snapshot.streamId}),[["Cookie",`fsq_auto_v1=${fixture.claim}`],["Authorization","secret"]]),
   ]) assert.notEqual((await fixture.http.handle(invalid)).status,204);
 });
+test("embedded preflight and zero-body POST bind exactly one prepared origin before upgrade",async()=>{const fixture=await ensured();assert.ok((await fixture.auth.prepareEmbedded(fixture.snapshot.streamId)).ok);const preflight=await fixture.http.handle(embeddedRequest("OPTIONS","/v1/app-sessions",undefined,[["Access-Control-Request-Method","POST"]]));assert.equal(preflight.status,204);assert.equal(preflight.headers["Access-Control-Allow-Origin"],embeddedOrigin);const bound=await fixture.http.handle(embeddedRequest("POST","/v1/app-sessions"));assert.equal(bound.status,204);assert.equal(bound.headers["Access-Control-Allow-Origin"],embeddedOrigin);assert.equal(bound.headers["Set-Cookie"],undefined);const upgrade=await fixture.http.validateUpgrade({method:"GET",target:"/v1/stream",rawHeaders:[["Host",fixture.http.authority],["Origin",embeddedOrigin],["Sec-Fetch-Site","cross-site"],["Sec-Fetch-Mode","websocket"],["Sec-Fetch-Dest","empty"],["Upgrade","websocket"],["Connection","upgrade"],["Sec-WebSocket-Version","13"],["Sec-WebSocket-Key","AAAAAAAAAAAAAAAAAAAAAA=="],["Sec-WebSocket-Protocol","fsq-viewer.v1"]]});assert.ok(upgrade.ok);const second=await ensured();assert.equal((await second.http.handle(embeddedRequest("POST","/v1/app-sessions"))).status,409);});
 
 test("session response rollback invalidates provisional media and retry succeeds",async()=>{
   const fixture=await claim();

@@ -29,7 +29,7 @@ const ATTACHMENT: RuntimeAttachment = Object.freeze({
     generation: GENERATION,
     contractVersion: 2,
     deviceRef: DEVICE,
-    features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const),
+    features: Object.freeze(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] as const),
   }),
 });
 const DESCRIPTOR = Object.freeze({

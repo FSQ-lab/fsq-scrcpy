@@ -155,7 +155,7 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 
 - 平台组合仍为本地macOS arm64、恰好一台USB Android及一个persistent Runtime/stream；新增provider-neutral bounded long-poll `wait`，调用方按revision恢复，不保存server-side cursor或per-client history。
 - ordinary client支持`wait`；下方`fsq-scrcpy stream wait/watch`只消费该seam。Capture/Viewer no-delta；既有viewer ensure/stream inspect继续透传Contracts exact值。
-- Contracts clean cutover把`RuntimeInstance.features`固定为`["wait-v1","auto-bootstrap-v1"]`，扩展同一个observation value并保留bounded wait route；不升ControlVersion、不新增error/dependency/媒体或支持矩阵声明。
+- Contracts clean cutover当前把`RuntimeInstance.features`固定为`["wait-v1","auto-bootstrap-v1","mcp-app-v1"]`；bounded wait observation契约保持，不升ControlVersion。
 - Runtime用既有StateStore mutex/history/monotonic Clock实现原子注册、change/terminal/timeout/cancel线性化；最多8 authenticated connections/in-flight、4 concurrent waits、每local client及socket一个wait，所有完成路径恰好一次释放listener/timer/admission。
 - Exact provider值、canonical bytes、caps、deadline、close/cancel与验收由Contracts/Runtime同名delta定义；CLI framing/lifecycle由下方Integrations契约定义。
 
@@ -193,6 +193,20 @@ The dependency graph additionally permits only `Integrations → Runtime + Contr
 - 正常用户路径无 pairing code、pairing UI、owner approve 或 CLI approve。Runtime pairing/redeem/bootstrap-grant route、owner approve control route及其共享类型、Viewer UI/轮询和CLI grammar一次 clean cut删除，不保留alias、shim或deprecated path。
 - ViewerAuthorization 是 Runtime 唯一授权状态模块；复用既有 StateStore mutex、single-Viewer slot、session cookie、visible lease、5秒 grace、fresh-paint Live、媒体/ACK/Canvas管线和统一终止。Capture仍只由 authenticated visible demand惰性打开。
 - MCP四工具、schema、result、dual-era stdio和AgentControl接口no-delta；`fsq_viewer_ensure`只通过既有ensure语义自动arm。CLI `viewer ensure --json`相同行为；`viewer approve`在产品I/O前成为deterministic invalid syntax。
-- `RuntimeInstance.features` clean cut为exact `['wait-v1','auto-bootstrap-v1']`；旧/缺失/重复/额外/乱序feature fail closed。Contracts、Runtime、Viewer、Integrations完整细节由各模块同名active条款共同定义。
+- `RuntimeInstance.features`当前clean cut为exact `['wait-v1','auto-bootstrap-v1','mcp-app-v1']`；旧/缺失/重复/额外/乱序feature fail closed。Contracts、Runtime、Viewer、Integrations完整细节由各模块active条款共同定义。
 - 30秒permit、delivery rollback、TTL/cancel/response-loss/first-browser race、refresh/grace/restart/stop/new StreamId、privacy和legacy/modern installed真实链路是验收边界。verified Host register保持空；通过不生成最终Host或平台支持声明。
 - 本节与四个模块同名条款已原子激活；被替代的owner-approved pairing契约已clean cut移除，五模块不得部分回退。
+
+## VS Code MCP App Viewer Contract
+
+本节定义 `ANDROID-MCP-VIEWER-04`。目标组合固定为 macOS 26.7.1 build 25G241 arm64、VS Code Stable 1.144.0 arm64 build `2c33b50b16c472efe58357d1d2a8a5414bc23fbf`、local stdio MCP、MCP Apps extension `2026-01-26`、一个已授权 USB Android、一个 Runtime/stream 及一个 Viewer；它不建立通用 Host、Android 平台或支持矩阵声明。
+
+- `fsq_viewer_ensure` 在 Host 协商 `io.modelcontextprotocol/ui` MIME capability 后关联 `text/html;profile=mcp-app` 的 `ui://` Viewer resource；不支持 Apps 的 Host 继续得到现有 protected standalone URL。四个模型可见 tool name/schema、safe `content`/`structuredContent` DTO、cancel/EOF 与 CLI fallback 不变。
+- 官方生产依赖新增 exact `@modelcontextprotocol/ext-apps@2.0.3` 与固定 registry integrity `sha512-Tn+4+cyhO4f4cQSDxNyLiIfEE+qlTTuIbWBJB8JTinEXOhDYgCT4wDTQplxD9MBYZH5pCYGC59GaxiwIT4bu8w==`；继续复用 `@modelcontextprotocol/server@2.3.1` 与 `zod@4.6.7`。package metadata 为 MIT；distributed LICENSE 为 Apache-2.0/MIT transition，非 specification 文档另含 CC-BY-4.0；实际 bundled files 必须逐项完成 LICENSE/NOTICE/SBOM 归属。不得自研 MCP Apps transport/schema。
+- Runtime 在同一 `ViewerAuthorization` mutex 内同时 arm standalone 与 embedded admission；embedded 不传 credential。第一个在现有30秒permit内完成的 eligible standalone claim 或 exact VS Code webview Origin bind 获得唯一 Viewer，原子撤销另一 admission；第二 Viewer 在 Capture/media 分配前 fail closed。
+- VS Code local MCP server 的多个App文档共享一个server-level webview Origin，因此Origin不是document identity。无credential模式下 embedded WebSocket禁止跨document reconnect：同一socket存活时仍复用既有visibility/grace；socket关闭即terminal，后续remount/retry必须authenticated ensure取得新admission。active socket前并发App只允许首个upgrade，败者不影响赢家。
+- MCP App 复用同一 Viewer state、Worker、binary WebSocket、H.264/MJPEG decode、Canvas、ACK、fresh-paint Live、visibility/grace、metrics 与 cleanup 管线，只增加 embedded bootstrap Adapter。不得通过 MCP 传媒体、复制第二媒体实现或启用 dual viewing。内嵌 Viewer 必须提供显式 `Stop viewing`：本地立即 dispose Worker、发送既有 WebSocket `leave`、释放唯一 Viewer/stream，并 best-effort 请求 Host teardown；Host 保留文档或拒绝 teardown 不得继续占用投屏，新一次 authenticated ensure 必须可取得新 StreamId。
+- embedded admission 只绑定浏览器提供的 exact `vscode-webview://<52-char-hash>` Origin，不把 capability、cookie、permit 或 private Runtime locator 放入 MCP `_meta`、stdio、content、structuredContent、transcript、模型上下文、URL、argv、env、日志或持久化。接受同一 OS、已知 standalone URI 的 first-eligible-VS-Code-App residual；不承诺跨本机账户/恶意同 uid 隔离。
+- 不支持extension时Host使用既有tool text URL。Apps-capable ensure未能prepare、early resource read或embedded CSP/connect/LNA/bind/WS失败时，`resources/read`仍返回无外联权限的fallback App shell，用户通过其button调用`ui/open-link`打开同一standaloneUri；transport级resource加载或Host renderer自身失败不构成受支持路径并使exact Host gate失败。fallback不另建stream、不延长permit、不绕过single-Viewer或Runtime授权。
+- `RuntimeInstance.features` clean cut为exact `['wait-v1','auto-bootstrap-v1','mcp-app-v1']`；旧tuple fail closed。Capture no-delta；Contracts、Runtime、Viewer、Integrations的同名条款共同拥有完整接口、竞态、隐私与验收。
+- 真实验收必须使用fresh private pack/install和上述exact VS Code UI，覆盖embedded fresh Live、rotation、visibility/grace、socket-close terminal、unsupported与fallback-shell路径、CSP/LNA/connect拒绝、first-claim race、stop/new StreamId、Runtime restart、owner shutdown、global ADB/device settings存活及raw stdio/transcript/privacy。只有全部通过后才可登记verified Host或支持矩阵。

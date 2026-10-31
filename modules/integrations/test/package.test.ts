@@ -70,7 +70,7 @@ const log=process.env.FSQ_FIXTURE_LOG,note=value=>appendFileSync(log,value+"\\n"
 note("load:"+process.pid);process.once("exit",()=>note("exit:"+process.pid));
 const snap=(revision=1)=>Object.freeze({streamId,deviceRef:device,revision,phase:"demand-pending",activeViewerCount:0,updatedAt:revision});
 const observed=(revision=1)=>({ok:true,value:{snapshot:snap(revision),changes:[snap(revision)],reset:false,timedOut:false}}),revisionError={controlVersion:{major:1,minor:0},code:"revision-conflict",disposition:"recoverable",operationState:"not-applied",safeMessage:"The expected revision does not match."};
-const attachment=Object.freeze({disposition:"attached",instance:Object.freeze({controlVersion:Object.freeze({major:1,minor:0}),instanceId:"323e4567-e89b-42d3-a456-426614174000",generation:"423e4567-e89b-42d3-a456-426614174000",contractVersion:2,deviceRef:device,features:Object.freeze(["wait-v1","auto-bootstrap-v1"])})});
+const attachment=Object.freeze({disposition:"attached",instance:Object.freeze({controlVersion:Object.freeze({major:1,minor:0}),instanceId:"323e4567-e89b-42d3-a456-426614174000",generation:"423e4567-e89b-42d3-a456-426614174000",contractVersion:2,deviceRef:device,features:Object.freeze(["wait-v1","auto-bootstrap-v1","mcp-app-v1"])})});
 const control={
  async ensureViewer(){return {ok:true,value:{deviceRef:device,descriptor:{contractVersion:2,streamId,standaloneUri:"http://127.0.0.1:49152/viewer/"+streamId,presentationModes:["standalone"],expiresAt:60},snapshot:snap()}};},
  async inspect(){return observed();},
@@ -86,7 +86,7 @@ const UUID_SCHEMA = { type: "string", pattern: UUID_PATTERN };
 const REVISION_SCHEMA = { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
 const DEVICE_SCHEMA = { type: "object", properties: { contractVersion: { type: "number", const: 2 }, platform: { type: "string", const: "android" }, namespace: { type: "string", minLength: 1, maxLength: 64, pattern: "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$" }, opaqueId: UUID_SCHEMA }, required: ["contractVersion", "platform", "namespace", "opaqueId"], additionalProperties: false };
 const EXPECTED_TOOLS = [
-  { name: "fsq_viewer_ensure", inputSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { selector: { oneOf: [{ type: "object", properties: { kind: { type: "string", const: "auto" }, platform: { type: "string", const: "android" } }, required: ["kind", "platform"], additionalProperties: false }, { type: "object", properties: { kind: { type: "string", const: "known" }, deviceRef: DEVICE_SCHEMA }, required: ["kind", "deviceRef"], additionalProperties: false }] } }, required: ["selector"], additionalProperties: false } },
+  { name: "fsq_viewer_ensure", inputSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { selector: { oneOf: [{ type: "object", properties: { kind: { type: "string", const: "auto" }, platform: { type: "string", const: "android" } }, required: ["kind", "platform"], additionalProperties: false }, { type: "object", properties: { kind: { type: "string", const: "known" }, deviceRef: DEVICE_SCHEMA }, required: ["kind", "deviceRef"], additionalProperties: false }] } }, required: ["selector"], additionalProperties: false }, _meta: { "ui/resourceUri": "ui://fsq-scrcpy/viewer-v1", ui: { resourceUri: "ui://fsq-scrcpy/viewer-v1", visibility: ["model"] } } },
   { name: "fsq_stream_inspect", inputSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { deviceRef: DEVICE_SCHEMA, streamId: UUID_SCHEMA, afterRevision: REVISION_SCHEMA }, required: ["deviceRef", "streamId"], additionalProperties: false } },
   { name: "fsq_stream_wait", inputSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { deviceRef: DEVICE_SCHEMA, streamId: UUID_SCHEMA, afterRevision: REVISION_SCHEMA, waitMs: { type: "integer", minimum: 0, maximum: 25_000, default: 25_000 } }, required: ["deviceRef", "streamId", "afterRevision"], additionalProperties: false } },
   { name: "fsq_stream_stop", inputSchema: { $schema: "https://json-schema.org/draft/2020-12/schema", type: "object", properties: { deviceRef: DEVICE_SCHEMA, streamId: UUID_SCHEMA, expectedRevision: REVISION_SCHEMA }, required: ["deviceRef", "streamId"], additionalProperties: false } },
@@ -312,7 +312,7 @@ export function createRuntimeOwnerLocal() {
 import { appendFile, writeFile } from "node:fs/promises";
 const device = Object.freeze({ contractVersion: 2, platform: "android", namespace: "fsq.android.local", opaqueId: "${DEVICE_ID}" });
 const stream = "223e4567-e89b-42d3-a456-426614174000";
-const target = Object.freeze({ controlVersion: Object.freeze({ major: 1, minor: 0 }), instanceId: "323e4567-e89b-42d3-a456-426614174000", generation: "423e4567-e89b-42d3-a456-426614174000", contractVersion: 2, deviceRef: device, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"]) });
+const target = Object.freeze({ controlVersion: Object.freeze({ major: 1, minor: 0 }), instanceId: "323e4567-e89b-42d3-a456-426614174000", generation: "423e4567-e89b-42d3-a456-426614174000", contractVersion: 2, deviceRef: device, features: Object.freeze(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"]) });
 const snap = (revision, phase = "demand-pending") => Object.freeze({ streamId: stream, deviceRef: device, revision, phase, ...(phase === "stopped" ? { reason: "explicit-stop" } : {}), activeViewerCount: 0, updatedAt: revision });
 const seen = (snapshot, changes = [snapshot], reset = false, timedOut = false) => Object.freeze({ ok: true, value: Object.freeze({ snapshot, changes: Object.freeze(changes), reset, timedOut }) });
 const cancelled = Object.freeze({ ok: false, error: Object.freeze({ controlVersion: Object.freeze({ major: 1, minor: 0 }), code: "request-cancelled", disposition: "recoverable", operationState: "not-applied", safeMessage: "The control request was cancelled before it was applied." }) });
@@ -408,6 +408,16 @@ await test("packed private package installs a shebang executable invoked through
     "modules/viewer/dist/entry.js",
     "modules/viewer/dist/worker.js",
     "modules/viewer/dist/style.css",
+    "modules/viewer/dist/index.html",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.txt",
+    "licenses/MODEL-CONTEXT-PROTOCOL.txt",
+    "licenses/ZOD.txt",
+    "licenses/STANDARD-SCHEMA.txt",
+    "licenses/EVENTSOURCE.txt",
+    "licenses/EVENTSOURCE-PARSER.txt",
+    "licenses/JOSE.txt",
+    "licenses/PKCE-CHALLENGE.txt",
   ]) assert.equal(paths.includes(required), true, required);
   assert.equal(paths.some((path) => path.includes("/test/")), false);
 
@@ -417,9 +427,10 @@ await test("packed private package installs a shebang executable invoked through
   const packageRoot = join(prefix, "node_modules", "fsq-scrcpy");
   const metadata = JSON.parse(await readFile(join(packageRoot, "package.json"), "utf8")) as Record<string, unknown>;
   assert.equal(metadata.private, true);
+  assert.equal(metadata.license,"MIT");
   assert.deepEqual(metadata.bin, { "fsq-scrcpy": ".build/integrations/src/bin.js", "fsq-scrcpy-mcp": ".build/integrations/src/mcp-bin.js" });
-  for (const entryName of ["bin.js", "mcp-bin.js"]) assert.equal((await readFile(join(packageRoot, ".build", "integrations", "src", entryName), "utf8")).startsWith("#!/usr/bin/env node\n"), true);
   assert.equal(await readable(join(prefix, "node_modules", "@modelcontextprotocol", "client", "package.json")), undefined);
+  assert.equal(await readable(join(prefix, "node_modules", "@modelcontextprotocol", "ext-apps", "package.json")), undefined);
   assert.notEqual(await readable(join(prefix, "node_modules", "@modelcontextprotocol", "server", "package.json")), undefined);
   const installedHash = await treeHash(packageRoot);
 

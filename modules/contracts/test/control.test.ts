@@ -35,7 +35,7 @@ const GENERATION = "223e4567-e89b-42d3-a456-426614174000";
 const STREAM = "323e4567-e89b-42d3-a456-426614174000";
 const DEVICE = Object.freeze({ contractVersion: 2 as const, platform: "android" as const, namespace: "fsq.android.local", opaqueId: ID });
 const IOS_DEVICE = Object.freeze({ contractVersion: 2 as const, platform: "ios" as const, namespace: "fsq.ios.local", opaqueId: GENERATION });
-const INSTANCE: RuntimeInstance = Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: ID, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) });
+const INSTANCE: RuntimeInstance = Object.freeze({ controlVersion: CONTROL_VERSION, instanceId: ID, generation: GENERATION, contractVersion: 2, deviceRef: DEVICE, features: Object.freeze(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] as const) });
 const ATTACHMENT = Object.freeze({ disposition: "attached" as const, instance: INSTANCE });
 const DESCRIPTOR = Object.freeze({ contractVersion: 2 as const, streamId: STREAM, standaloneUri: `http://127.0.0.1:43210/viewer/${STREAM}`, presentationModes: Object.freeze(["standalone"] as const), expiresAt: 1_800_000_060_000 });
 const SNAPSHOT = Object.freeze({ streamId: STREAM, deviceRef: DEVICE, revision: 1, phase: "demand-pending" as const, activeViewerCount: 0 as const, updatedAt: 1_800_000_000_000 });
@@ -75,8 +75,8 @@ await test("RuntimeInstance version, feature and identity axes remain independen
     { features: ["wait-v1"] },
     { features: ["auto-bootstrap-v1", "wait-v1"] },
     { features: ["wait-v1", "auto-bootstrap-v1", "extra"] },
-    { features: Object.assign(["wait-v1", "auto-bootstrap-v1"], { hidden: true }) },
-    { features: Object.defineProperty(["wait-v1", "auto-bootstrap-v1"], "0", { get: () => "wait-v1", enumerable: true }) },
+    { features: Object.assign(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"], { hidden: true }) },
+    { features: Object.defineProperty(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"], "0", { get: () => "wait-v1", enumerable: true }) },
     { instanceId: STREAM.toUpperCase() },
     { generation: "00000000-0000-4000-8000-000000000000", pid: 42 },
   ]) invalid(() => validateRuntimeInstance({ ...INSTANCE, ...change }));
@@ -227,12 +227,12 @@ await test("RuntimeControlSession exposes only a deeply frozen attachment", asyn
 
 await test("session constructor copies attachment and rejects forged values", () => {
   const mutableDevice: { contractVersion: 2; platform: "android"; namespace: string; opaqueId: string } = { ...DEVICE };
-  const mutable = { disposition: "started" as const, instance: { ...INSTANCE, deviceRef: mutableDevice, controlVersion: { ...CONTROL_VERSION }, features: ["wait-v1", "auto-bootstrap-v1"] as ["wait-v1", "auto-bootstrap-v1"] } };
+  const mutable = { disposition: "started" as const, instance: { ...INSTANCE, deviceRef: mutableDevice, controlVersion: { ...CONTROL_VERSION }, features: ["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] as ["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] } };
   const control = { ensureViewer: async () => ({ ok: false as const, error: controlError("instance-not-found") }), inspect: async () => ({ ok: false as const, error: controlError("instance-not-found") }), wait: async () => ({ ok: false as const, error: controlError("instance-not-found") }), stopStream: async () => ({ ok: false as const, error: controlError("instance-not-found") }), close: async () => undefined };
   const session = new RuntimeControlSession(mutable, control);
   mutable.instance.deviceRef.namespace = "changed";
   mutable.instance.features.push("wait-v1" as never);
-  assert.deepEqual(session.attachment.instance.features, ["wait-v1", "auto-bootstrap-v1"]);
+  assert.deepEqual(session.attachment.instance.features, ["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"]);
   assert.equal(session.attachment.instance.deviceRef.namespace, "fsq.android.local");
   invalid(() => new RuntimeControlSession({ ...ATTACHMENT, disposition: "other" as never }, control));
 });

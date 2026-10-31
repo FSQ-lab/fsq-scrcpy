@@ -12,13 +12,13 @@ const keys=(v:object,want:readonly string[]):boolean=>{if(Object.getPrototypeOf(
 const safeInt=(v:unknown):v is number=>typeof v==="number"&&Number.isSafeInteger(v)&&v>0;
 export class WorkerController{
  #socket:SocketLike|undefined;#handled=new WeakSet<SocketLike>();#decoder:DecoderLike|undefined;#protocol=new MediaProtocol();#chain=Promise.resolve();#gate:Promise<void>|undefined;#unfence:(()=>void)|undefined;#resets=new Map<number,bigint>();#generation=0;#visible=false;#started=false;#disposed=false;#opened=false;#ended=false;#fenced=false;#sawSession=false;#reconnects=0;#timer:unknown;#lastLease="";#streamId="";#origin="";#session:Session|undefined;#metas:Meta[]=[];#owned=new Map<bigint,Owned>();#pending:Meta|undefined;#fresh=true;#releasedFloor=0n;#sentAckFloor=0n;#releasedSinceAck=0;#sourceFrames=0;#outputs=0;#openedAt:number|undefined;#resetCompletions=0;#configChecks=0;#configSettled=0;#pendingConfigChecks=0;#configSupported=false;
- #profile:MediaProfile="h264-annexb";#probePending=false;#probeDeadline=0;#probeTimer:unknown;#painted=0n;
+ #profile:MediaProfile="h264-annexb";#presentation:"standalone"|"embedded"="standalone";#probePending=false;#probeDeadline=0;#probeTimer:unknown;#painted=0n;
  // Queued Session resets may change decoder generation without changing receipt eligibility.
  #visibilityEpoch=0;
  #jpegJob:Meta|undefined;#jpegNext:{event:Extract<ProtocolEvent,{type:"frame"}>;meta:Meta;session:Session}|undefined;
  constructor(readonly a:WorkerAdapters){}
  message(value:unknown):void{if(this.#disposed)return;if(this.#ended){if(typeof value==="object"&&value!==null&&!Array.isArray(value)&&keys(value,["type"])&&(value as Record<string,unknown>).type==="dispose")this.#dispose();return;}if(typeof value!=="object"||value===null||Array.isArray(value))return this.#fault("malformed-control");const v=value as Record<string,unknown>,type=v.type;
-  if(type==="start"&&keys(v,["type","origin","streamId","mediaProfile"])&&typeof v.origin==="string"&&typeof v.streamId==="string"&&(v.mediaProfile==="h264-annexb"||v.mediaProfile==="mjpeg"))return this.#start(v.origin,v.streamId,v.mediaProfile);
+  if(type==="start"&&keys(v,["type","origin","streamId","mediaProfile","presentation"])&&typeof v.origin==="string"&&typeof v.streamId==="string"&&(v.mediaProfile==="h264-annexb"||v.mediaProfile==="mjpeg")&&(v.presentation==="standalone"||v.presentation==="embedded"))return this.#start(v.origin,v.streamId,v.mediaProfile,v.presentation);
   if(type==="capability-result"&&keys(v,["type","generation","supported"])&&v.generation===1&&typeof v.supported==="boolean"&&this.#probePending){
    this.#probePending=false;
    if(!v.supported||this.a.now()>=this.#probeDeadline)return this.#unsupported();
@@ -28,7 +28,7 @@ export class WorkerController{
   if(type==="frame-complete"&&keys(v,["type","generation","sequence","presented"])&&safeInt(v.generation)&&typeof v.sequence==="bigint"&&v.sequence>0n&&typeof v.presented==="boolean"&&this.#started)return this.#complete(v.generation,v.sequence,v.presented);
   if(type==="reset-complete"&&keys(v,["type","generation","discardThroughSequence"])&&safeInt(v.generation)&&typeof v.discardThroughSequence==="bigint"&&v.discardThroughSequence>=0n&&this.#started)return this.#resetComplete(v.generation,v.discardThroughSequence);
   if(type==="dispose"&&keys(v,["type"])&&this.#started)return this.#dispose();this.#fault("malformed-control");}
- #start(origin:string,streamId:string,profile:MediaProfile):void{
+ #start(origin:string,streamId:string,profile:MediaProfile,presentation:"standalone"|"embedded"):void{
   if(this.#started)return this.#fault("malformed-control");
   const startedAt=this.a.now();
   try{
@@ -37,7 +37,7 @@ export class WorkerController{
    if(!match||Number(match[1])>65535)throw 0;
    this.#origin=origin;
   }catch{return this.#fault("malformed-control");}
-  this.#streamId=streamId;this.#started=true;this.#generation=1;this.#profile=profile;
+  this.#streamId=streamId;this.#started=true;this.#generation=1;this.#profile=profile;this.#presentation=presentation;
   this.#probeDeadline=startedAt+5000;
   this.a.post({type:"state",state:"connecting"});
   if(!this.a.foundation(profile))return this.#unsupported();
@@ -198,8 +198,8 @@ export class WorkerController{
   this.#lastLease=key;
   this.#socket?.send(JSON.stringify({v:1,type:"lease-renew",visible:this.#visible,creditFrames,creditBytes}));
  }
- #closed(ws:SocketLike):void{if(this.#handled.has(ws))return;this.#handled.add(ws);if(ws!==this.#socket||this.#disposed||this.#ended)return;this.#socket=undefined;this.#opened=false;if(this.#timer!==undefined)this.a.clearInterval(this.#timer);if(this.#visible&&this.#reconnects===0){this.#protocol=new MediaProtocol();this.#beginReset(0n,true);}else{this.#ended=true;this.#cleanup(false);this.a.post({type:"state",state:"disconnected"});}}
  #unsupported():void{this.#ended=true;this.#cleanup(false);this.a.post({type:"error",code:"viewer-unsupported",safeMessage:"This browser cannot decode the stream."});this.a.post({type:"state",state:"unsupported"});}
+ #closed(ws:SocketLike):void{if(this.#handled.has(ws))return;this.#handled.add(ws);if(ws!==this.#socket||this.#disposed||this.#ended)return;this.#socket=undefined;this.#opened=false;if(this.#timer!==undefined)this.a.clearInterval(this.#timer);if(this.#presentation==="standalone"&&this.#visible&&this.#reconnects===0){this.#protocol=new MediaProtocol();this.#beginReset(0n,true);}else{this.#ended=true;this.#cleanup(false);this.a.post({type:"state",state:"disconnected"});}}
  #settleConfig(supported:boolean):void{this.#configSettled++;if(this.#pendingConfigChecks>0)this.#pendingConfigChecks--;this.#configSupported=supported;if(!this.#disposed)this.#metric({});}
  #metric(sample:Readonly<Record<string,number|boolean>>):void{this.a.post({type:"metrics",sample:{...sample,sourceFrames:this.#sourceFrames,outputs:this.#outputs,decodeQueue:this.#decoder?.decodeQueueSize??0,ownedFrames:this.#owned.size,resetCompletions:this.#resetCompletions,configChecks:this.#configChecks,configSettled:this.#configSettled,configCheckPending:this.#pendingConfigChecks>0,...(this.#configSettled>0?{configSupported:this.#configSupported}:{})}});}
  #fault(code:"malformed-control"|"malformed-media"|"decoder-error"):void{if(this.#ended||this.#disposed)return;this.#ended=true;this.#cleanup(false);this.a.post({type:"error",code:code==="decoder-error"?"codec-config-error":code,safeMessage:code==="decoder-error"?"The video decoder failed.":"The stream was rejected."});this.a.post({type:"state",state:"error"});}
@@ -214,7 +214,7 @@ export function workerFoundation(profile:MediaProfile):boolean{
   :typeof VideoDecoder!=="undefined"&&typeof EncodedVideoChunk!=="undefined");
 }
 const scope=globalThis as typeof globalThis&{postMessage?:(message:unknown,transfer?:Transferable[])=>void;onmessage?:((event:MessageEvent)=>void)|null;close?:()=>void};
-if(typeof scope.postMessage==="function"){
+if(typeof document==="undefined"&&typeof scope.postMessage==="function"){
  const controller=new WorkerController({
   foundation:workerFoundation,
   bitmap:bytes=>createImageBitmap(new Blob([bytes as Uint8Array<ArrayBuffer>],{type:"image/jpeg"}),{imageOrientation:"from-image"}),

@@ -2,6 +2,7 @@
   "name": "fsq-scrcpy",
   "version": "0.0.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "fsq-scrcpy": ".build/integrations/src/bin.js",
@@ -12,7 +13,9 @@
     ".build/runtime/src",
     ".build/contracts/src",
     ".build/capture/src",
-    "modules/viewer/dist"
+    "modules/viewer/dist",
+    "THIRD_PARTY_NOTICES.txt",
+    "licenses"
   ],
   "engines": {
     "node": "24.22.1",
@@ -76,6 +79,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.3",
     "@esbuild/darwin-arm64": "0.28.2",
     "@modelcontextprotocol/client": "2.3.1",
     "@types/node": "24.12.4",

@@ -46,7 +46,7 @@ function generation(slot: AndroidRuntimeSlot): RuntimeGenerationState {
   return Object.freeze({ runtimeStateVersion: 1, deviceRef: slot.deviceRef, instanceId: randomUUID(), generation: randomUUID(), port: slot.control.port, createdAt: NOW + 1, ready: true });
 }
 function live(slot: RuntimeSlot, target: RuntimeTarget) {
-  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const) }) }) });
+  return Object.freeze({ ok: true as const, value: Object.freeze({ instance: Object.freeze({ controlVersion: CONTROL_VERSION, ...target, contractVersion: 2 as const, deviceRef: slot.deviceRef, features: Object.freeze(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] as const) }) }) });
 }
 function fakeOwner(target: RuntimeTarget, _slot: RuntimeSlot, calls: unknown[]) {
   let closed = false;

@@ -7,7 +7,7 @@ import { freeze } from "./types.js";
 import { MutationCancelled, StateStore } from "./state.js";
 
 const AUTH_DIAGNOSTICS = diagnosticsChannel("fsq.runtime.session.auth.v1");
-type SlotState = "vacant" | "armed" | "claim-delivering" | "claimed" | "session-delivering" | "session-issued" | "connected" | "grace";
+type SlotState = "vacant" | "armed" | "claim-delivering" | "claimed" | "session-delivering" | "session-issued" | "embedded-bound" | "connected" | "grace";
 class ViewerToken {
   #raw: string;
   constructor(raw:string){this.#raw=raw;Object.freeze(this);}
@@ -42,6 +42,9 @@ interface Slot {
   sessionTimer?: object | undefined;
   graceTimer?: object | undefined;
   graceDeadline?: number | undefined;
+  embeddedArmed?: boolean | undefined;
+  embeddedOrigin?: string | undefined;
+  presentation?: "standalone" | "embedded" | undefined;
 }
 
 const ok = <T>(value: T): AuthResult<T> => freeze({ ok: true, value });
@@ -103,6 +106,49 @@ export class ViewerAuthorization {
 
   inspect(value: unknown): InspectResult { return this.state.inspect(value); }
   stop(value: unknown): Promise<StopResult> { return this.state.stop(value); }
+  async prepareEmbedded(streamId: string): Promise<AuthResult<Readonly<{ streamId: string; expiresAt: number }>>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || slot.streamId !== streamId || slot.state !== "armed" || !this.state.hasActive(streamId) || this.clock.mono() >= slot.permitDeadline) return no("conflict");
+      slot.embeddedArmed = true;
+      return ok(freeze({ streamId, expiresAt: this.clock.wall() + Math.floor(Math.max(0, slot.permitDeadline - this.clock.mono())) }));
+    });
+  }
+
+  async bindEmbedded(origin: string): Promise<AuthResult<Readonly<{ streamId: string }>>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || !this.state.hasActive(slot.streamId)) return no("not-found");
+      if (slot.state === "embedded-bound" && slot.embeddedOrigin === origin) return ok(freeze({ streamId: slot.streamId }));
+      if (slot.state !== "armed" || !slot.embeddedArmed || this.clock.mono() >= slot.permitDeadline) return no("conflict");
+      slot.embeddedArmed = false;
+      slot.embeddedOrigin = origin;
+      slot.presentation = "embedded";
+      slot.claimDigest = undefined;
+      slot.sessionGeneration++;
+      slot.sessionId = uuid(this.entropy);
+      slot.sessionDeadline = this.clock.mono() + 60_000;
+      slot.state = "embedded-bound";
+      this.#armSession(slot);
+      return ok(freeze({ streamId: slot.streamId }));
+    });
+  }
+
+  async validateEmbeddedUpgrade(origin: string): Promise<AuthResult<UpgradeDescriptor>> {
+    return this.state.mutex.run(() => {
+      this.#expire();
+      const slot = this.#slot;
+      if (!slot || slot.state !== "embedded-bound" || slot.embeddedOrigin !== origin || !slot.sessionId || slot.sessionDeadline === undefined || !this.state.hasActive(slot.streamId)) return no(slot?.state === "connected" ? "limit" : "unauthorized");
+      return ok(freeze({ streamId: slot.streamId, sessionId: slot.sessionId, generation: slot.sessionGeneration, deadline: slot.sessionDeadline, presentation: "embedded" }));
+    });
+  }
+
+  allowsEmbeddedAsset(origin: string): boolean {
+    const slot = this.#slot;
+    return !!slot && slot.embeddedOrigin === origin && ["embedded-bound", "connected", "grace"].includes(slot.state) && this.state.hasActive(slot.streamId);
+  }
 
   async navigate(streamId: string, claimToken?: string, mediaToken?: string): Promise<AuthResult<NavigationDecision>> {
     return this.state.mutex.run(() => {
@@ -190,7 +236,7 @@ export class ViewerAuthorization {
       this.#expire();
       const slot = this.#slot;
       if (!slot || !this.state.hasActive(slot.streamId) || !this.#mediaMatches(slot, token, ["session-issued", "grace"]) || !slot.sessionId || slot.sessionDeadline === undefined) return no(slot?.state === "connected" ? "limit" : "unauthorized");
-      return ok(freeze({ streamId: slot.streamId, sessionId: slot.sessionId, generation: slot.sessionGeneration, deadline: slot.sessionDeadline }));
+      return ok(freeze({ streamId: slot.streamId, sessionId: slot.sessionId, generation: slot.sessionGeneration, deadline: slot.sessionDeadline, presentation: "standalone" }));
     });
   }
 
@@ -214,7 +260,7 @@ export class ViewerAuthorization {
     return this.state.mutex.run(() => {
       this.#expire();
       const slot = this.#slot;
-      if (!slot || !["connected", "grace"].includes(slot.state) || slot.sessionId !== sessionId || !slot.sessionDigest || !this.state.hasActive(slot.streamId) || this.#graceExpired(slot)) return no("unauthorized");
+      if (!slot || !["connected", "grace"].includes(slot.state) || slot.sessionId !== sessionId || !this.state.hasActive(slot.streamId) || this.#graceExpired(slot) || (slot.presentation === "standalone" ? !slot.sessionDigest : !slot.embeddedOrigin)) return no("unauthorized");
       if (!activate()) return ok(undefined);
       const returning = slot.graceDeadline !== undefined;
       if (slot.graceTimer) this.clock.clear(slot.graceTimer);
@@ -222,6 +268,7 @@ export class ViewerAuthorization {
       delete slot.graceDeadline;
       slot.state = "connected";
       if (returning) this.state.transitionLocked(slot.streamId, "syncing", 1);
+      if (slot.presentation === "embedded") { slot.sessionDeadline = this.clock.mono() + 60_000; this.#armSession(slot); }
       return ok(undefined);
     });
   }
@@ -229,11 +276,24 @@ export class ViewerAuthorization {
   hasVisibleDemand(streamId: string): boolean {
     const slot = this.#slot;
     if (slot?.streamId===streamId && slot.sessionDeadline!==undefined && this.clock.mono()>=slot.sessionDeadline) { void this.state.mutex.run(()=>this.#expire()); return false; }
-    return !!slot && slot.streamId === streamId && slot.state === "connected" && !!slot.sessionDigest && slot.sessionDeadline !== undefined && slot.graceDeadline === undefined;
+    return !!slot && slot.streamId === streamId && slot.state === "connected" && slot.sessionDeadline !== undefined && slot.graceDeadline === undefined && (slot.presentation === "embedded" ? !!slot.embeddedOrigin : !!slot.sessionDigest);
   }
 
   async disconnect(): Promise<void> {
     await this.state.mutex.run(() => { this.#expire(); const slot = this.#slot; if (slot?.state === "connected") this.#beginGrace(slot); });
+  }
+
+  async connectionClosed(descriptor: UpgradeDescriptor): Promise<void> {
+    if (descriptor.presentation === "embedded") {
+      await this.state.mutex.run(() => {
+        const slot = this.#slot;
+        if (!slot || slot.streamId !== descriptor.streamId || slot.sessionId !== descriptor.sessionId || slot.presentation !== "embedded") return;
+        this.demandLost(slot.streamId);
+        void this.state.terminal.request(slot.streamId, "lease-expired");
+      });
+      return;
+    }
+    await this.disconnect();
   }
 
   revoke(streamId: string): void {
@@ -247,6 +307,9 @@ export class ViewerAuthorization {
       if (this.#slot !== slot || slot.delivery !== delivery || slot.state !== "claim-delivering") return;
       if (this.clock.mono() >= slot.permitDeadline || !this.state.hasActive(slot.streamId)) return this.#vacate(slot);
       slot.state = "claimed";
+      slot.embeddedArmed = false;
+      slot.embeddedOrigin = undefined;
+      slot.presentation = "standalone";
     });
   }
 
@@ -266,6 +329,7 @@ export class ViewerAuthorization {
       slot.priorSessionDeadline=undefined;
       slot.priorSessionGeneration=undefined;
       slot.state = "session-issued";
+      slot.presentation = "standalone";
       this.#armSession(slot);
     });
   }
@@ -295,7 +359,7 @@ export class ViewerAuthorization {
   #checkConnection(descriptor: UpgradeDescriptor): AuthResult<undefined> {
     this.#expire();
     const slot = this.#slot;
-    if (!slot || !slot.sessionId || slot.sessionDeadline === undefined || descriptor.streamId !== slot.streamId || descriptor.sessionId !== slot.sessionId || descriptor.generation !== slot.sessionGeneration || descriptor.deadline !== slot.sessionDeadline || !this.state.hasActive(slot.streamId) || !["session-issued", "grace"].includes(slot.state) || this.#graceExpired(slot)) return no(slot?.state === "connected" ? "limit" : "unauthorized");
+    if (!slot || !slot.sessionId || slot.sessionDeadline === undefined || descriptor.streamId !== slot.streamId || descriptor.sessionId !== slot.sessionId || descriptor.generation !== slot.sessionGeneration || descriptor.deadline !== slot.sessionDeadline || descriptor.presentation !== slot.presentation || !this.state.hasActive(slot.streamId) || (descriptor.presentation === "embedded" ? slot.state !== "embedded-bound" || !slot.embeddedOrigin : !["session-issued", "grace"].includes(slot.state) || this.#graceExpired(slot))) return no(slot?.state === "connected" ? "limit" : "unauthorized");
     return ok(undefined);
   }
 
@@ -326,7 +390,7 @@ export class ViewerAuthorization {
       void this.state.mutex.run(() => {
         if (this.#slot !== slot || slot.generation !== generation || slot.permitDeadline !== deadline) return;
         if (this.clock.mono() < deadline) return this.#armPermit(slot);
-        if (["armed", "claim-delivering", "claimed", "session-delivering"].includes(slot.state)) this.#vacate(slot);
+        if (["armed", "claim-delivering", "claimed", "session-delivering", "embedded-bound"].includes(slot.state)) this.#vacate(slot);
       });
     });
   }
@@ -378,7 +442,7 @@ export class ViewerAuthorization {
     const slot = this.#slot;
     if (!slot) return;
     const now = this.clock.mono();
-    if (now >= slot.permitDeadline && ["armed", "claim-delivering", "claimed", "session-delivering"].includes(slot.state)) { this.#vacate(slot); return; }
+    if (now >= slot.permitDeadline && ["armed", "claim-delivering", "claimed", "session-delivering", "embedded-bound"].includes(slot.state)) { this.#vacate(slot); return; }
     if (slot.sessionDeadline === undefined || now < slot.sessionDeadline) return;
     slot.sessionDigest=undefined;
     if (slot.sessionTimer) this.clock.clear(slot.sessionTimer);
@@ -401,6 +465,9 @@ export class ViewerAuthorization {
     slot.priorSessionDigest = undefined;
     slot.priorSessionDeadline = undefined;
     delete slot.graceDeadline;
+    slot.embeddedArmed = false;
+    slot.embeddedOrigin = undefined;
+    slot.presentation = undefined;
     slot.state = "vacant";
     slot.delivery = 0;
   }

@@ -9,7 +9,8 @@ import {
   type RuntimeControl,
   type StreamSnapshot,
 } from "../../contracts/src/index.js";
-import { createAgentControl } from "../src/agent-control.js";
+import { createAgentControl,createAgentPresentation } from "../src/agent-control.js";
+import type { PresentationRuntimeControl } from "../../runtime/src/types.js";
 
 const DEVICE_ID = "123e4567-e89b-42d3-a456-426614174000";
 const OTHER_ID = "223e4567-e89b-42d3-a456-426614174000";
@@ -31,7 +32,7 @@ const ATTACHMENT: RuntimeAttachment = Object.freeze({
     generation: GENERATION_ID,
     contractVersion: 2,
     deviceRef: DEVICE,
-    features: Object.freeze(["wait-v1", "auto-bootstrap-v1"] as const),
+    features: Object.freeze(["wait-v1", "auto-bootstrap-v1", "mcp-app-v1"] as const),
   }),
 });
 const snapshot = (
@@ -86,13 +87,14 @@ interface Calls {
   controlOptions: unknown[];
   closes: number;
 }
-function fixture(overrides: Partial<RuntimeControl> = {}): {
+function fixture(overrides: Partial<RuntimeControl&PresentationRuntimeControl> = {}): {
   calls: Calls;
   agent: ReturnType<typeof createAgentControl>;
+  presenter:ReturnType<typeof createAgentPresentation>;
   setAcquire(value: unknown): void;
 } {
   const calls: Calls = { acquire: [], options: [], control: [], controlOptions: [], closes: 0 };
-  const control: RuntimeControl = {
+  const control: RuntimeControl&PresentationRuntimeControl = {
     async ensureViewer(options) {
       calls.control.push(["ensure"]);
       calls.controlOptions.push(options);
@@ -108,6 +110,7 @@ function fixture(overrides: Partial<RuntimeControl> = {}): {
       calls.controlOptions.push(options);
       return observation(input.afterRevision + 1) as never;
     },
+    async prepareEmbeddedViewer(input,options){calls.control.push(["prepare",input]);calls.controlOptions.push(options);return Object.freeze({ok:true as const,value:Object.freeze({streamId:input.streamId,expiresAt:60})});},
     async stopStream(input, options) {
       calls.control.push(["stop", input]);
       calls.controlOptions.push(options);
@@ -124,17 +127,12 @@ function fixture(overrides: Partial<RuntimeControl> = {}): {
       async close() { calls.closes++; },
     },
   };
+  const dependencies={acquireRuntime:(async(request:unknown,options:unknown)=>{calls.acquire.push(request);calls.options.push(options);if(acquireValue instanceof Error)throw acquireValue;return acquireValue;}) as never};
   return {
     calls,
     setAcquire(value) { acquireValue = value; },
-    agent: createAgentControl({
-      acquireRuntime: (async (request: unknown, options: unknown) => {
-        calls.acquire.push(request);
-        calls.options.push(options);
-        if (acquireValue instanceof Error) throw acquireValue;
-        return acquireValue;
-      }) as never,
-    }),
+    agent:createAgentControl(dependencies),
+    presenter:createAgentPresentation(dependencies),
   };
 }
 
@@ -165,6 +163,8 @@ await test("ensure owns the only start-or-attach mapping, validates parity, free
     },
   });
 });
+
+await test("presentation ensures and prepares within one acquired session",async()=>{const value=fixture(),controller=new AbortController();const transaction=await value.presenter.ensure({selector:{kind:"known",deviceRef:DEVICE},prepareEmbedded:true},{signal:controller.signal});assert.equal(transaction.result.ok,true);assert.deepEqual(transaction.prepared,{ok:true,value:{streamId:STREAM_ID,expiresAt:60}});assert.deepEqual(value.calls.acquire,[{mode:"start-or-attach",selector:{kind:"known",deviceRef:DEVICE}}]);assert.deepEqual(value.calls.control,[["ensure"],["prepare",{streamId:STREAM_ID}]]);assert.equal(value.calls.closes,1);assert.equal(value.calls.controlOptions.every(value=>(value as {signal:AbortSignal}).signal===controller.signal),true);const withoutApp=fixture();const standalone=await withoutApp.presenter.ensure({selector:{kind:"auto",platform:"android"},prepareEmbedded:false});assert.equal(standalone.result.ok,true);assert.equal(standalone.prepared,undefined);assert.deepEqual(withoutApp.calls.control,[["ensure"]]);assert.equal(withoutApp.calls.closes,1);});
 
 await test("expected acquire failures remain exact safe results", async () => {
   const value = fixture();
@@ -245,15 +245,17 @@ await test("one openKnown session maps inspect, wait, and stop without reacquire
   const signal = new AbortController().signal;
   const session = await value.agent.openKnown({ deviceRef: DEVICE }, { signal });
   assert.deepEqual(Reflect.ownKeys(session), []);
-  assert.deepEqual(Reflect.ownKeys(Object.getPrototypeOf(session)).filter((key) => key !== "constructor"), ["inspect", "wait", "stop", "close"]);
+  assert.deepEqual(Reflect.ownKeys(Object.getPrototypeOf(session)).filter((key) => key !== "constructor"), ["inspect", "wait", "stop", "prepareEmbedded", "close"]);
   for (const forbidden of ["control", "deviceRef", "closeSession", "unavailable"]) assert.equal(Reflect.get(session, forbidden), undefined);
   assert.equal(JSON.stringify(session), "{}");
   const inspected = await session.inspect({ streamId: STREAM_ID, afterRevision: 2 }, { signal });
   const waited = await session.wait({ streamId: STREAM_ID, afterRevision: 2, waitMs: 25_000 }, { signal });
   const stopped = await session.stop({ streamId: STREAM_ID, expectedRevision: 3 }, { signal });
+  const prepared=await session.prepareEmbedded({streamId:STREAM_ID},{signal});
   assert.equal(inspected.ok, true);
   assert.equal(waited.ok, true);
   assert.equal(stopped.ok, true);
+  assert.equal(prepared.ok,true);
   assert.deepEqual(value.calls.acquire, [{
     mode: "attach-only",
     selector: { kind: "known", deviceRef: DEVICE },
@@ -262,6 +264,7 @@ await test("one openKnown session maps inspect, wait, and stop without reacquire
     ["inspect", { streamId: STREAM_ID, afterRevision: 2 }],
     ["wait", { streamId: STREAM_ID, afterRevision: 2, waitMs: 25_000 }],
     ["stop", { streamId: STREAM_ID, expectedRevision: 3 }],
+    ["prepare",{streamId:STREAM_ID}],
   ]);
   for (const options of value.calls.controlOptions) {
     assert.equal((options as { signal: AbortSignal }).signal, signal);

@@ -1,0 +1,13 @@
+FSQ_scrcpy includes or bundles the following third-party software. Each component remains subject to its own license.
+
+@modelcontextprotocol/ext-apps 2.0.3 — Apache-2.0/MIT transition; see licenses/MODEL-CONTEXT-PROTOCOL.txt
+@modelcontextprotocol/client 2.3.1 — Apache-2.0/MIT transition; see licenses/MODEL-CONTEXT-PROTOCOL.txt
+@modelcontextprotocol/core 2.3.1 — Apache-2.0/MIT transition; see licenses/MODEL-CONTEXT-PROTOCOL.txt
+zod 4.6.7 — MIT; see licenses/ZOD.txt
+@standard-schema/spec 1.1.0 — MIT; see licenses/STANDARD-SCHEMA.txt
+eventsource 3.0.7 — MIT; see licenses/EVENTSOURCE.txt
+eventsource-parser 3.1.1 — MIT; see licenses/EVENTSOURCE-PARSER.txt
+jose 6.2.13 — MIT; see licenses/JOSE.txt
+pkce-challenge 5.0.1 — MIT; see licenses/PKCE-CHALLENGE.txt
+
+Upstream source locations are recorded in each package's package.json and npm registry metadata. The license texts listed above are distributed with this package.

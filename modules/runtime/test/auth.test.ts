@@ -27,6 +27,7 @@ test("ensure arms one exact 30000ms permit and repeat does not slide", async () 
   const claim = await fixture.auth.navigate(fixture.snapshot.streamId);
   assert.ok(claim.ok);
 });
+test("embedded permit binds one origin and produces an origin-bound descriptor",async()=>{const fixture=await ensured(),origin=`vscode-webview://${"a".repeat(52)}`,other=`vscode-webview://${"b".repeat(52)}`;fixture.clock.monoNow+=0.25;const prepared=await fixture.auth.prepareEmbedded(fixture.snapshot.streamId);assert.ok(prepared.ok);if(prepared.ok){assert.equal(Number.isSafeInteger(prepared.value.expiresAt),true);assert.equal(prepared.value.expiresAt,fixture.clock.wall()+29_999);}const bound=await fixture.auth.bindEmbedded(origin);assert.ok(bound.ok);assert.equal((await fixture.auth.bindEmbedded(other)).ok,false);const upgrade=await fixture.auth.validateEmbeddedUpgrade(origin);assert.ok(upgrade.ok);if(upgrade.ok){assert.equal(upgrade.value.presentation,"embedded");assert.equal(upgrade.value.streamId,fixture.snapshot.streamId);}assert.equal((await fixture.auth.validateEmbeddedUpgrade(other)).ok,false);});
 
 test("deadline minus one delivery commits while exact deadline expires", async () => {
   const before = await ensured();
