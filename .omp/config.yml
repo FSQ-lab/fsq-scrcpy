@@ -1,8 +1,8 @@
 modelRoles:
-  fsq_research: github-copilot/gpt-6.1-sol
-  fsq_worker: github-copilot/gpt-6.1-sol
-  fsq_architecture: github-copilot/gpt-5.6-sol-1m:medium
-  fsq_review: github-copilot/gpt-5.6-sol-1m:medium
+  fsq_research: github-copilot/gpt-5.6-sol:medium
+  fsq_worker: github-copilot/gpt-5.6-sol:medium
+  fsq_architecture: github-copilot/gpt-5.6-sol:medium
+  fsq_review: github-copilot/gpt-5.6-sol:medium
 
 task:
   maxConcurrency: 3
